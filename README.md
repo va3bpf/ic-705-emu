@@ -153,6 +153,9 @@ nothing. PTT is not on the panel.
   pressed, shows Hello, World! with an uptime counter, and goes back to deep
   standby after a 1 s hold of POWER. Like the Icom firmware it raises PWRS
   (P7_15, supply rails) and PWRDS (P10_3, the POWER LED) while on.
+- `examples/lvgl`: a starting point for third-party firmware: FreeRTOS
+  tasks and an LVGL user interface on the touch screen, tuned with the
+  main dial. See [examples/lvgl/README.md](examples/lvgl/README.md).
 
 ```sh
 sh examples/power/build.sh
@@ -194,7 +197,7 @@ python ic705_remote.py --host user@raspberrypi.local --load examples/power/power
 | `qemu/ic705/` | Device models written by this project (IC-705 board and RZ/A1H blocks), one file per device |
 | `qemu/patches/` | Changes to QEMU itself: build glue, icount and TCG speed-ups |
 | `decoder/` | Icom `.dat` firmware package decoder |
-| `examples/` | Bare-metal programs for the main CPU (hello, power on/off) |
+| `examples/` | Programs for the main CPU: hello, power on/off, LVGL + FreeRTOS |
 | `docs/` | Hardware and firmware notes ([board behaviour](docs/ic705/BOARD.md), [I/O map](docs/ic705/IO_MAP.md)), [speed history](docs/speed.md), [how the emulator works](docs/emulator.html) |
 | `NOTICE.md` | Origin and licence of each part |
 

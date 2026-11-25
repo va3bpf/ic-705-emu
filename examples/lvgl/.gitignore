@@ -1,0 +1,4 @@
+third_party/
+build/
+lvgl_demo.elf
+lvgl_demo.bin
