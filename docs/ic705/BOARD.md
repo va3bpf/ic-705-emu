@@ -48,6 +48,7 @@ the launcher idles the ladders at 0x3FF.
 | Main dial | MTU2 channel 1 in phase-counting mode; 10 Hz per count in the default step | `qom-set /machine/mtu2 dial N` |
 | MIC UP, DN, V/M | ARM ADC channel 6 ladder (10-bit): 160–236, 56–124, 312–397, 509–597 = levels 0–3, released ≥ 836 | `qom-set /machine/adc vals "6=90"` |
 | ARM ADC channels 4, 5 | two more ladders (412–880 = levels 1–4, released ≥ 920) | idle 0x3FF |
+| Battery | ARM ADC channel 7 (BTVIN, 0.359 × battery voltage, 10-bit of 3.3 V): 0x300 = 6.9 V shows one red bar (low), 0x337 = 7.4 V two bars, 0x391 = 8.2 V full | the launcher sets 0x391; `qom-set /machine/adc vals "7=0x337"` |
 | POWER | PWRK, P8_7, low = pressed | `qom-set /machine/gpio pins "8_7=0"` |
 
 Short key presses need about 4 s of wall time between them in the emulator

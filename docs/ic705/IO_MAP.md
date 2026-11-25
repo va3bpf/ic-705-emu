@@ -75,7 +75,14 @@ belong to the sub-CPU. The remote panel reads the RZ latches from the
 | P10_7 | M22 | SCRES | out | sub-CPU reset (IC901 NRST side) | [SM], [INF] for the target pin |
 | SCIF3 | | | | clock-synchronous SPI master of the sub's SPI1 | [FW] [VM] |
 | MTU2 ch1 | | (main dial) | in | phase counting | [FW] [VM] |
-| ADC ch4–7 | | (MIC UP/DN, V/M, ladders) | in | see [BOARD.md](BOARD.md) | [FW] [VM] |
+| P1_8 AN0 | AA17 | PHOTOL | ain | light sensor | [SM] |
+| P1_9 AN1 | AB18 | IDL | ain | drain current sense | [SM], [INF] for the meaning |
+| P1_10 AN2 | Y17 | FORL | ain | forward power | [SM] |
+| P1_11 AN3 | AA18 | REFL | ain | reflected power | [SM] |
+| P1_12 AN4 | AB19 | SKYS | ain | key ladder (see [BOARD.md](BOARD.md)) | [SM] [FW] |
+| P1_13 AN5 | Y18 | DSHK | ain | key ladder | [SM] [FW] |
+| P1_14 AN6 | AA19 | MUDL | ain | microphone UP/DN, V/M ladder | [SM] [FW] [VM] |
+| P1_15 AN7 | Y19 | BTVIN | ain | battery voltage: battery + -> R26 1M -> BTVIN -> R27 560k -> GND (PA-A unit), then R812 1k (main unit); BTVIN = 0.359 x V_BAT | [SM] [VM] |
 
 ## Sub-CPU (STM32L051R8H6, IC901) [SM p86]
 

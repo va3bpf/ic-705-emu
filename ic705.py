@@ -80,7 +80,9 @@ def run(qemu, images, screenshot, seconds, shift, io_wait, quantum_us, vnc=None)
         RZA1H_BOARD="ic705",
         RZA1H_PINS="8_7=1,8_0=0,8_1=0,8_8=0,8_9=0,8_10=1,8_11=1",
         RZA1H_DSWAKE_BIT="10",
-        RZA1H_ADC_VALS="0x300,0x300,0x300,0x300,0x3ff,0x3ff,0x3ff,0x300",
+        # ARM ADC AN0..AN7 (10-bit, 3.3 V); AN4..AN6 key ladders released; AN7 = BTVIN,
+        # the battery through 1M/560k: 0x391 = 8.2 V, a charged BP-272 (docs/ic705/IO_MAP.md)
+        RZA1H_ADC_VALS="0x300,0x300,0x300,0x300,0x3ff,0x3ff,0x3ff,0x391",
         RZA1H_SUBCPU_FW=str(images / IMAGES[1]),
         RZA1H_RSPI4_FLASH=str(images / IMAGES[2]),
         RZA1H_IC705_EEPROM=str(images / "eeprom.bin"),
@@ -172,7 +174,7 @@ def run_image(qemu, image, screenshot, seconds, vnc=None, sub_images=None,
     env = {k: v for k, v in os.environ.items() if not k.startswith("RZA1H_")}
     env.update(RZA1H_BOARD="ic705",
                RZA1H_PINS="8_7=1,8_0=0,8_1=0,8_8=0,8_9=0,8_10=1,8_11=1",
-               RZA1H_ADC_VALS="0x3ff,0x3ff,0x3ff,0x3ff,0x3ff,0x3ff,0x3ff,0x3ff")
+               RZA1H_ADC_VALS="0x3ff,0x3ff,0x3ff,0x3ff,0x3ff,0x3ff,0x3ff,0x391")
     icount = []
     if sub_images is not None:
         env.update(QEMU_ICOUNT_IO_WAIT=f"{io_wait},0",
