@@ -12,7 +12,7 @@ The table lists where each part came from.
 | `decoder/` | [sq6emm/ic705-ic9700-ic905-bring-your-own-firmware](https://github.com/sq6emm/ic705-ic9700-ic905-bring-your-own-firmware) @ `a91231f`, reduced to the files the launcher uses | MIT (`decoder/LICENSE`) |
 | `docs/ic705/IO_MAP.md`, `docs/ic705/BOARD.md` | this project, from the IC-705 service manual, the firmware and tests | MIT (`LICENSE`) |
 | `docs/rz-a1h-machine.md` | ic7300-homebrew `qemu-machine/README.md` | MIT |
-| `ic705.py`, `ic705_remote.py`, `build-qemu.sh`, `README.md`, `examples/`, `docs/speed.md`, `docs/emulator.html`, `docs/images/` | this project | MIT (`LICENSE`) |
+| `ic705_emu.py`, `ic705_panel.py`, `build-qemu.sh`, `README.md`, `examples/`, `docs/speed.md`, `docs/emulator.html`, `docs/images/` | this project | MIT (`LICENSE`) |
 | LVGL, FreeRTOS kernel (fetched by `examples/lvgl/build.sh`, not in the repository) | [lvgl/lvgl](https://github.com/lvgl/lvgl) v9.2.2, [FreeRTOS/FreeRTOS-Kernel](https://github.com/FreeRTOS/FreeRTOS-Kernel) V11.1.0 | MIT |
 
 A QEMU binary built from this tree is covered by QEMU's licence

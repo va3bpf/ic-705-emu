@@ -18,8 +18,8 @@ external RAM.
 ```sh
 sudo apt install gcc-arm-none-eabi     # or the Arm GNU toolchain
 sh examples/lvgl/build.sh              # fetches LVGL v9.2.2 and FreeRTOS V11.1.0
-python3 ic705.py examples/lvgl/lvgl_demo.bin
-python ic705_remote.py --host user@raspberrypi.local --load examples/lvgl/lvgl_demo.bin
+python3 ic705_emu.py examples/lvgl/lvgl_demo.bin
+python ic705_panel.py --host user@raspberrypi.local --load examples/lvgl/lvgl_demo.bin
 ```
 
 In the window, `p` is POWER, the wheel is the main dial and the mouse is the
@@ -37,8 +37,8 @@ GUI up, free heap 452976 bytes
 band 7 m: 7074000 Hz
 ```
 
-With `--vnc N`, ic705.py puts SCIF0 and SCIF1 on TCP port 4500+N
-(`nc 127.0.0.1 4511` for display 11); ic705_remote.py shows them in the
+With `--vnc N`, ic705_emu.py puts SCIF0 and SCIF1 on TCP port 4500+N
+(`nc 127.0.0.1 4511` for display 11); ic705_panel.py shows them in the
 loader's "Serial log" pane, locally or through its ssh tunnel.
 
 ## How it fits together

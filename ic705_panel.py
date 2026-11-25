@@ -1,7 +1,7 @@
 """Run the IC-705 emulator on a remote Linux host (e.g. a Raspberry Pi) and show
 it as a radio front panel in a local window.
 
-The script starts `ic705.py --vnc` on the remote host over ssh and forwards its
+The script starts `ic705_emu.py --vnc` on the remote host over ssh and forwards its
 LCD (VNC) and control (QMP) ports through the same ssh connection. The window
 draws the 480x272 LCD in a front panel laid out like the IC-705's: keys (held
 while the mouse button is held), the TWIN PBT, AF/RF-SQL and MULTI knobs (drag
@@ -12,8 +12,8 @@ sub-CPU's LED outputs. The LCD is the touch panel; the keyboard keys of the GTK
 window still work. Only the Python standard library and the system's `ssh`
 client are needed.
 
-    python ic705_remote.py --host user@raspberrypi.local
-    python ic705_remote.py --host user@raspberrypi.local --scale 2
+    python ic705_panel.py --host user@raspberrypi.local
+    python ic705_panel.py --host user@raspberrypi.local --scale 2
 
 --load sends a file from this computer to the host first and runs that instead
 of --firmware: an Icom .dat package, or a bare-metal flash image (.bin, booted
@@ -21,8 +21,8 @@ at 0x18000000 on the IC-705 board, e.g. examples/power/power.bin). With
 --subcpu a .bin also gets Icom's sub-CPU firmware from --firmware beside it
 (panel keys, TX/RX LEDs).
 
-    python ic705_remote.py --host user@raspberrypi.local --load firmware/705E140.dat
-    python ic705_remote.py --host user@raspberrypi.local --load examples/hello/hello.bin
+    python ic705_panel.py --host user@raspberrypi.local --load firmware/705E140.dat
+    python ic705_panel.py --host user@raspberrypi.local --load examples/hello/hello.bin
 
 Without arguments the window opens with nothing running: File > Host... sets
 the emulator host (remembered): 'local' runs the emulator on this computer (in
@@ -31,7 +31,7 @@ firmware... starts one.
 The window's File menu opens another firmware (Ctrl+O), reloads the current one
 after a rebuild (F5) or goes back to the Icom firmware; the Run menu saves LCD
 screenshots and chooses whether a .bin gets the sub-CPU. Recent files and that
-choice are kept in ~/.ic705_remote.json.
+choice are kept in ~/.ic705_panel.json.
 """
 
 import argparse
@@ -1141,7 +1141,8 @@ class LiveRadio:
         return call
 
 
-SETTINGS = Path.home() / ".ic705_remote.json"
+SETTINGS = Path.home() / ".ic705_panel.json"
+OLD_SETTINGS = Path.home() / ".ic705_remote.json"   # before the rename
 ROOT = Path(__file__).resolve().parent
 
 
@@ -1277,7 +1278,7 @@ class ParamikoRun:
 
 
 def local_path(path):
-    """@path as ic705.py on this computer sees it: a WSL path on Windows."""
+    """@path as ic705_emu.py on this computer sees it: a WSL path on Windows."""
     if sys.platform != "win32":
         return str(path)
     result = subprocess.run(["wsl", "wslpath", "-a", str(path).replace("\\", "/")],
@@ -1329,7 +1330,8 @@ class Session:
         self.log = queue.Queue()                # serial output for the loader's log pane
         self.run_id = 0
         try:
-            self.config = json.loads(SETTINGS.read_text(encoding="utf-8-sig"))
+            saved = SETTINGS if SETTINGS.exists() or not OLD_SETTINGS.exists() else OLD_SETTINGS
+            self.config = json.loads(saved.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             self.config = {}
         self.config.setdefault("mode", "local")
@@ -1412,7 +1414,7 @@ class Session:
         options = ["--vnc", str(a.display)]
         if self.config.get("subcpu") and self.name.lower().endswith(".bin"):
             options += ["--subcpu", self.icom_firmware]   # Icom's sub-CPU beside your firmware
-        command = ["python3", "ic705.py", firmware] + options
+        command = ["python3", "ic705_emu.py", firmware] + options
         self.status = f"starting {self.name} ..."
         if not self.remote:                     # this computer: WSL on Windows
             if sys.platform == "win32":

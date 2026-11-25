@@ -6,7 +6,7 @@ their own firmware from the official update package, side by side in virtual
 time. The firmware boots to its normal main screen and you use it through an
 emulated front panel: touch LCD, keys, knobs, main dial, POWER and LEDs.
 
-![The front-panel window, ic705_remote.py, running examples/power](docs/images/front-panel.png)
+![The front-panel window, ic705_panel.py, running examples/power](docs/images/front-panel.png)
 
 The firmware is never patched. Everything it talks to is modelled in the
 emulator instead: GPIO, SPI, I2C EEPROM, timers, the LCD controller, the touch
@@ -69,10 +69,10 @@ Download the E-region 1.40 package from
 ## Run
 
 ```sh
-python3 ic705.py firmware/705E140.dat
+python3 ic705_emu.py firmware/705E140.dat
 ```
 
-From PowerShell: `wsl python3 ic705.py firmware/705E140.dat`.
+From PowerShell: `wsl python3 ic705_emu.py firmware/705E140.dat`.
 
 A GTK window shows the LCD. Click it to touch; the wheel or the left/right
 arrows turn the main dial; `m` MENU, `f` FUNCTION, `q` QUICK, `s` M.SCOPE,
@@ -87,7 +87,7 @@ port 4400+N, both on 127.0.0.1.
 ## Run on a Raspberry Pi, show it on Windows
 
 A Raspberry Pi 5 runs the emulator faster than a laptop under WSL2, and
-`ic705_remote.py` shows it on Windows as a full front panel. The Pi needs no
+`ic705_panel.py` shows it on Windows as a full front panel. The Pi needs no
 screen.
 
 **On the Pi** (Raspberry Pi OS or Debian, 64-bit):
@@ -99,7 +99,7 @@ git clone https://github.com/va3bpf/ic-705-emu ~/ic705-emu
 cd ~/ic705-emu
 bash build-qemu.sh
 # copy 705E140.dat into ~/ic705-emu/firmware/
-python3 ic705.py firmware/705E140.dat --prepare
+python3 ic705_emu.py firmware/705E140.dat --prepare
 ```
 
 **On Windows**, with Python 3 from python.org (it includes Tk) and the
@@ -113,10 +113,10 @@ type %USERPROFILE%\.ssh\id_ed25519.pub | ssh user@raspberrypi.local "cat >> ~/.s
 Then, in this repository:
 
 ```bat
-python ic705_remote.py --host user@raspberrypi.local
+python ic705_panel.py --host user@raspberrypi.local
 ```
 
-The script logs in with ssh, starts `ic705.py --vnc 11` on the Pi and
+The script logs in with ssh, starts `ic705_emu.py --vnc 11` on the Pi and
 forwards the LCD (VNC), control (QMP) and serial-log ports through the same ssh
 connection. All three listen only on the Pi's 127.0.0.1. `--dir` and `--firmware`
 set the paths on the Pi. The window opens at 1:1. Ctrl+wheel or Ctrl +/- zoom
@@ -126,14 +126,14 @@ the largest zoom that fits.
 The same window also runs the emulator on this computer: `--host local`
 starts it in WSL on Windows (or directly on Linux), with no ssh.
 
-**Loader.** `python ic705_remote.py` without arguments opens two windows:
+**Loader.** `python ic705_panel.py` without arguments opens two windows:
 the loader and, once something runs, the front panel it owns. In the loader
 choose the firmware (a local `.bin` or `.dat`, uploaded first for a remote
 host, or a path on the host), Local (WSL on Windows, or directly on Linux)
 or Remote (host, user, and a password or empty for your ssh key), and
 whether Icom's sub-CPU runs beside your `.bin`. Start/Stop, Restart (F5,
 after a rebuild) and Screenshot are there too. Every change is saved at
-once in `~/.ic705_remote.json` (the password encrypted with Windows DPAPI)
+once in `~/.ic705_panel.json` (the password encrypted with Windows DPAPI)
 and used at the next start; a saved firmware starts by itself.
 
 Closing the panel window only hides it, and "Show panel" brings it back;
@@ -178,17 +178,17 @@ nothing. PTT is not on the panel.
 
 ```sh
 sh examples/power/build.sh
-python3 ic705.py examples/power/power.bin        # local GTK window, `p` = POWER
+python3 ic705_emu.py examples/power/power.bin        # local GTK window, `p` = POWER
 ```
 
 A `.bin` runs on the IC-705 board, so POWER, touch, the knobs and the main
 dial reach it. `--subcpu` adds the sub-CPU firmware from an Icom package
-(panel keys, LEDs); both CPUs then run under `-icount`. `ic705_remote.py
+(panel keys, LEDs); both CPUs then run under `-icount`. `ic705_panel.py
 --load FILE` sends a local `.bin` or `.dat` to the remote host and runs it
 there (add `--subcpu` for the sub-CPU from `--firmware`):
 
 ```bat
-python ic705_remote.py --host user@raspberrypi.local --load examples/power/power.bin
+python ic705_panel.py --host user@raspberrypi.local --load examples/power/power.bin
 ```
 
 ## What to expect
@@ -209,8 +209,8 @@ python ic705_remote.py --host user@raspberrypi.local --load examples/power/power
 
 | Path | Contents |
 |---|---|
-| `ic705.py` | Launcher: decodes the firmware package, starts QEMU, presses POWER |
-| `ic705_remote.py` | Front-panel window for an emulator running on another host |
+| `ic705_emu.py` | Launcher: decodes the firmware package, starts QEMU, presses POWER |
+| `ic705_panel.py` | Front-panel window for an emulator running on another host |
 | `build-qemu.sh` | Downloads QEMU, applies the patches, builds `qemu-system-arm` |
 | `qemu/machine/` | RZ/A1H machine and IC-705 device models |
 | `qemu/ic705/` | Device models written by this project (IC-705 board and RZ/A1H blocks), one file per device |

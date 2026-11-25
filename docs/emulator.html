@@ -119,7 +119,7 @@ CPU、内存、闪存、GPIO、SPI、I²C、串口、LCD 控制器、定时器�
   <text x="105" y="158" text-anchor="middle">decoder/</text>
   <text x="105" y="177" text-anchor="middle" class="small">解密、解压、拆分</text>
   <rect x="25" y="215" width="160" height="70" rx="6" class="box-sw"/>
-  <text x="105" y="238" text-anchor="middle">ic705.py 启动器</text>
+  <text x="105" y="238" text-anchor="middle">ic705_emu.py 启动器</text>
   <text x="105" y="256" text-anchor="middle" class="small">拼闪存、设环境变量</text>
   <text x="105" y="272" text-anchor="middle" class="small">QMP 按 POWER</text>
   <rect x="25" y="310" width="160" height="80" rx="6" class="box-sw"/>
@@ -188,7 +188,7 @@ CPU、内存、闪存、GPIO、SPI、I²C、串口、LCD 控制器、定时器�
 </table></div>
 
 <h2 id="flow"><span class="n">3</span>从固件包到屏幕</h2>
-<h3>3.1 准备固件（<code>decoder/</code> + <code>ic705.py</code>）</h3>
+<h3>3.1 准备固件（<code>decoder/</code> + <code>ic705_emu.py</code>）</h3>
 <ol class="steps">
   <li>读取 Icom 的 <code>705E140.dat</code>。它是加密、压缩后的打包格式。</li>
   <li><code>decoder/ic705_decode.py</code> 解密（autokey）、LZSS 解压，拆出各个部分：主程序区、副 CPU 程序 <code>aux2</code>、DSP/FPGA 组 <code>dsp.image.bin</code>、WLAN 固件。</li>
@@ -399,7 +399,7 @@ icount 模式的时间按指令计算，不受宿主线程调度影响，所以�
 </ol>
 
 <h2 id="ref"><span class="n">9</span>参数与环境变量</h2>
-<h3>启动器 <code>ic705.py</code></h3>
+<h3>启动器 <code>ic705_emu.py</code></h3>
 <div class="tbl"><table>
   <tr><th>参数</th><th>默认</th><th>作用</th></tr>
   <tr><td><code>--io-wait N</code></td><td>128</td><td>每次外设访问额外计入的指令数；0 = 原版 icount</td></tr>

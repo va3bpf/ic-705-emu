@@ -1,6 +1,6 @@
 /*
  * IC-705 front panel from the QEMU window (panel_input.c), for
- * `-display gtk` / VNC. The remote panel (ic705_remote.py) drives the same
+ * `-display gtk` / VNC. The remote panel (ic705_panel.py) drives the same
  * inputs over QMP instead.
  *
  *   mouse on the LCD       touch panel, pressed while the left button is

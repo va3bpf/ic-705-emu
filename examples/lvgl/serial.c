@@ -2,7 +2,7 @@
  * Debug log on SCIF0: 115200 8N1, transmit only, polled.
  *
  * In the emulator SCIF0 and SCIF1 go to TCP port 4500+N (N = the VNC display;
- * ic705.py) and ic705_remote.py shows them in the loader's serial log pane.
+ * ic705_emu.py) and ic705_panel.py shows them in the loader's serial log pane.
  * On a real radio SCIF0's TxD pin would also need its pin function set; the
  * emulator does not model pin multiplexing, so this file does not do that.
  *

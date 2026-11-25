@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build lvgl_demo.bin: LVGL + FreeRTOS on the IC-705 main CPU (RZ/A1H, Cortex-A9),
-# a flat image loaded at 0x18000000 (python3 ic705.py examples/lvgl/lvgl_demo.bin).
+# a flat image loaded at 0x18000000 (python3 ic705_emu.py examples/lvgl/lvgl_demo.bin).
 # LVGL and the FreeRTOS kernel are fetched at pinned tags into third_party/.
 set -e
 cd "$(dirname "$0")"

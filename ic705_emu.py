@@ -68,7 +68,7 @@ def qmp(stream, command, **arguments):
 
 def serial_args(vnc, screenshot):
     """With a VNC display: SCIF0 and SCIF1 (the free UARTs; SCIF2 is the GNSS,
-    SCIF3 the sub-CPU link) on TCP port 4500+N, for ic705_remote.py's serial log."""
+    SCIF3 the sub-CPU link) on TCP port 4500+N, for ic705_panel.py's serial log."""
     if vnc is None or screenshot:
         return ["-serial", "none"]
     return ["-chardev", f"socket,id=log,host=127.0.0.1,port={4500 + vnc},server=on,"
@@ -111,7 +111,7 @@ def run(qemu, images, screenshot, seconds, shift, io_wait, quantum_us, vnc=None)
             "-qmp", f"unix:{monitor},server=on,wait=off",
         ]
         if vnc is not None and not screenshot:
-            # control port for ic705_remote.py's front panel (keys, knobs, dial, POWER)
+            # control port for ic705_panel.py's front panel (keys, knobs, dial, POWER)
             command += ["-qmp", f"tcp:127.0.0.1:{4400 + vnc},server=on,wait=off"]
         with subprocess.Popen(command, env=env) as process:
             try:
@@ -255,12 +255,12 @@ def main():
     parser.add_argument("--vnc", type=int, metavar="N",
                         help="no local window: serve the LCD as VNC display N on 127.0.0.1 "
                              "(port 5900+N) and a QMP control port on 4400+N, for "
-                             "ic705_remote.py over an SSH tunnel")
+                             "ic705_panel.py over an SSH tunnel")
     args = parser.parse_args()
     # SIGTERM and SIGHUP exit through the normal path, so QEMU is stopped
     # instead of being left running
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
-    if hasattr(signal, "SIGHUP"):           # the ssh session of ic705_remote.py ended
+    if hasattr(signal, "SIGHUP"):           # the ssh session of ic705_panel.py ended
         signal.signal(signal.SIGHUP, lambda signum, frame: sys.exit(128 + signum))
     if args.seconds is not None and args.seconds <= 0:
         parser.error("--seconds must be positive")
