@@ -1,0 +1,15 @@
+# Icom firmware and everything decoded from it
+firmware/
+state/
+*.dat
+*.bin
+*.png
+*.ppm
+
+# Local copies of the upstream repositories this project was assembled from
+.upstream/
+
+__pycache__/
+
+# Documentation images
+!docs/images/*.png

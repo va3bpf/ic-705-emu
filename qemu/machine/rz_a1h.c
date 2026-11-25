@@ -1,0 +1,573 @@
+/*
+ * IC-7300 / Renesas RZ/A1H research machine.
+ *
+ * A from-scratch QEMU machine for a SoC QEMU has no board support for --
+ * see qemu-machine/README.md for why this exists (the Unicorn-based
+ * emulator in emu/ hit a real engine limitation: no correctly-delivered
+ * asynchronous interrupt injection). The first slice modeled only the GIC
+ * and two OSTM timers; 2026-09-08's second pass (after confirming real IRQ
+ * delivery and finding body.bin's real tick source) added the rest of
+ * emu/peripherals/'s modules -- GIC/OSTM0/OSTM1/GPIO/L2C/CPG/MTU2/RIIC0-2
+ * are now real. Everything else still falls through to QEMU's own generic
+ * "unimplemented-device", the same role emu/peripherals/stub.py plays in
+ * the Unicorn version.
+ *
+ * Deliberately does *not* use hw/arm/boot.c's arm_load_kernel() -- that
+ * machinery is Linux-boot-oriented (kernel image format detection, device
+ * tree, ATAGs), none of which applies here. This SoC's real firmware is a
+ * bare flat binary executed directly from flash at a fixed physical
+ * address (notes/base-loader.md's fully-traced boot-mode-3 XIP
+ * convention), so this machine loads that image as ROM and manually
+ * overrides the CPU's reset PC -- the same pattern hw/arm/boot.c's own
+ * do_cpu_reset() uses internally for its own non-Linux ("raw") boot case,
+ * just without needing any of its surrounding kernel-image machinery.
+ */
+
+#include "qemu/osdep.h"
+#include "chardev/char.h"
+#include "qapi/error.h"
+#include "qemu/error-report.h"
+#include "qemu/timer.h"
+#include "hw/core/irq.h"
+#include "hw/core/boards.h"
+#include "hw/core/cpu.h"
+#include "hw/core/loader.h"
+#include "hw/core/qdev.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/sysbus.h"
+#include "hw/intc/arm_gic.h"
+#include "hw/misc/unimp.h"
+#include "hw/sd/sd.h"
+#include "hw/arm/machines-qom.h"
+#include "system/address-spaces.h"
+#include "system/blockdev.h"
+#include "system/memory.h"
+#include "system/reset.h"
+#include "system/system.h"
+#include "target/arm/cpu-qom.h"
+
+#include "rz_a1h.h"
+#include "rza1h_debug.h"
+#include "ic705/ic705.h"
+
+/* Every I/O region notes/memory-map.md documents, mirroring
+ * emu/board.py's IO_REGIONS list exactly (same names, same comments on
+ * where each one came from) -- covered generically by QEMU's own
+ * unimplemented-device until ported to a real device, same role
+ * emu/peripherals/stub.py's StubPeripheral plays in the Unicorn version. */
+struct RzA1hIoRegion {
+    const char *name;
+    hwaddr base;
+    hwaddr size;
+};
+
+static const struct RzA1hIoRegion rza1h_io_regions[] = {
+    /* CS0-CS5 external bus (2026-09-24): nothing is fitted there on the IC-7300, and an
+     * access to an empty CS area completes on the real bus instead of aborting (believed,
+     * not measured). body.bin relies on that: with an SD card inserted a voice-recorder
+     * stop routine (FUN_2006b3c0) runs with no operation started and writes through a
+     * NULL descriptor pointer, strb [0x68]. Left unmapped, that was a fatal external
+     * abort; -d unimp still logs such accesses. */
+    { "external-cs0-cs5",         0x00000000, 0x18000000 },
+    { "spi-status-and-neighbors", 0x3FEFA000, 0x00002000 },
+    { "boot-gpio-pokes",          0x3FFFC000, 0x00004000 },
+    { "io-e8000000",              0xE8000000, 0x00020000 },
+    { "io-e8030000",              0xE8030000, 0x00020000 },
+    { "io-e8100000",              0xE8100000, 0x00040000 },
+    { "io-e8200000",              0xE8200000, 0x00030000 },
+    { "io-fc000000",              0xFC000000, 0x00080000 },
+    { "io-fcfe0000",              0xFCFE0000, 0x00020000 },
+    { "io-ffff0000",              0xFFFF0000, 0x00010000 },
+};
+
+/* CPG (still, and RIIC before it got upgraded too -- see rz_a1h.h's own
+ * comments) is, like its emu/peripherals/ Python original, plain read/write
+ * storage with zero side effects modeled -- a bare RAM region is the
+ * simplest and most direct C equivalent of "arbitrary read/write, no
+ * behavior", not a simplification of anything that Python module actually
+ * did. MTU2 was the same until 2026-09-09 (see mtu2.c). Needs the
+ * `_overlap` variant since each of these ranges sits inside the broader
+ * "io-fcfe0000" unimplemented-device catch-all mapped later in
+ * rza1h_init() -- see spibsc.c for why plain
+ * memory_region_add_subregion() can't be used for a sub-range of an
+ * already-mapped sibling region. */
+static void add_plain_ram_region(MemoryRegion *sysmem, const char *name,
+                                 hwaddr base, hwaddr size)
+{
+    MemoryRegion *mr = g_new(MemoryRegion, 1);
+
+    memory_region_init_ram(mr, NULL, name, size, &error_fatal);
+    memory_region_add_subregion_overlap(sysmem, base, mr, 0);
+}
+
+static void rza1h_cpu_reset(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+    CPUState *cs = CPU(cpu);
+
+    cpu_reset(cs);
+    if (rza1h_board_ic705()) {
+        ic705_power_reset();                    /* deep-standby wake-up reason */
+    }
+    /* Real hardware's boot-mode-3 SPI-flash XIP entry point -- confirmed
+     * ground truth, see notes/base-loader.md and RZA1H_FLASH_BASE's own
+     * comment in rz_a1h.h. */
+    cpu_set_pc(cs, RZA1H_FLASH_BASE);
+}
+
+static void rza1h_init(MachineState *machine)
+{
+    MemoryRegion *sysmem = get_system_memory();
+    ARMCPU *cpu;
+    DeviceState *gic;
+    DeviceState *ostm0;
+    DeviceState *ostm1;
+    DeviceState *spibsc;
+    DeviceState *gpio;
+    DeviceState *l2c;
+    DeviceState *mmc;
+    DeviceState *mtu2;
+    DeviceState *dmac;
+    DeviceState *rspi2;
+    DeviceState *openvg;
+    DeviceState *adc;
+    DeviceState *vdc5;
+    DeviceState *scif3 = NULL;
+    size_t i;
+    int ch;
+
+    cpu = ARM_CPU(cpu_create(machine->cpu_type));
+
+    memory_region_add_subregion(sysmem, RZA1H_RAM_BASE, machine->ram);
+
+    /* rom_add_file_fixed() below only *registers* the blob to be copied in
+     * at reset time -- it does not create the backing memory region, so a
+     * real region has to exist here first or that copy has nowhere to land
+     * (confirmed the hard way: without this, the CPU's very first
+     * instruction fetch at RZA1H_FLASH_BASE faults immediately, since
+     * nothing is mapped there at all). */
+    {
+        MemoryRegion *flash = g_new(MemoryRegion, 1);
+        memory_region_init_rom(flash, NULL, "rza1h.flash", RZA1H_FLASH_SIZE,
+                               &error_fatal);
+        memory_region_add_subregion(sysmem, RZA1H_FLASH_BASE, flash);
+    }
+
+    if (!machine->kernel_filename) {
+        error_report("use -kernel to point at a flat flash image built by "
+                     "qemu-machine/tools/build_flash.py");
+        exit(1);
+    }
+    if (rom_add_file_fixed(machine->kernel_filename, RZA1H_FLASH_BASE, -1) < 0) {
+        error_report("could not load flash image '%s'", machine->kernel_filename);
+        exit(1);
+    }
+
+    /* Real ARM GIC (PL390-family), placed at the real hardware addresses --
+     * see rz_a1h.h. Not the MPCore wrapper (this SoC is single-core, and
+     * the real hardware exposes the distributor/CPU-interface directly at
+     * these addresses, not behind an intermediate container). */
+    gic = qdev_new(TYPE_ARM_GIC);
+    qdev_prop_set_uint32(gic, "num-cpu", 1);
+    qdev_prop_set_uint32(gic, "num-irq", RZA1H_GIC_NUM_IRQ);
+    /* Real RZ/A1H silicon implements only 5 priority bits (ICDIPRn[7:3]), not QEMU arm_gic's
+     * own default of 8 -- confirmed directly against Renesas' own sample driver
+     * (scratch/r01an5093ej0170-rza1-swpkg/.../r_intc_configure.c, R_INTC_SetPriority()): its
+     * own `priority` argument is documented range 0-31 and gets shifted left by 3 before the
+     * real ICDIPRn write, with the driver's own comment stating outright "Priority[7:3] of
+     * ICDIPRn is valid bit". Without this, arm_gic's own gic_fullprio_mask() (hw/intc/
+     * arm_gic.c, read directly) leaves all 8 bits significant, so a firmware priority write
+     * with nonzero low 3 bits (this project's own live capture found GICD_IPRIORITYR values
+     * like SCIF5-TXI's 0x7f, whose low 3 bits are 0b111) is stored and compared verbatim here,
+     * where real hardware would mask those bits to write-ignored on arrival (storing/reading
+     * back 0x78, not 0x7f) -- confirmed correct behavior is already implemented in
+     * gic_fullprio_mask()/gic_dist_set_priority(), just never enabled by this machine before
+     * now. 2026-09-10, prompted by the user's own real-world fact (never observed the ring
+     * overflow on real hardware) -- see README.md's Status section for the full derivation and
+     * whether this changes the observed overflow (checked, not assumed). */
+    qdev_prop_set_uint32(gic, "num-priority-bits", 5);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(gic), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(gic), 0, RZA1H_GIC_DIST_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(gic), 1, RZA1H_GIC_CPU_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(gic), 0,
+                       qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ));
+
+    /* OSTM0 -- the one real timer this slice exists to validate. Interrupt
+     * ID 134 is Renesas's own reference HAL's INTC_ID_OSTM0TINT, confirmed
+     * to be an absolute GIC interrupt ID -- see ostm.c's own file comment
+     * for the full derivation. `qdev_get_gpio_in(gic, N)`'s N is *not*
+     * that absolute ID, though -- confirmed 2026-09-08 by cross-checking
+     * hw/arm/fsl-imx6.c's own IRQ #defines (e.g. FSL_IMX6_UART1_IRQ used
+     * directly as a gpio-in index) against arm_gic's own gic_set_irq():
+     * external gpio-in index 0 maps to absolute interrupt ID GIC_INTERNAL
+     * (32, the first SPI) -- i.e. gpio-in index = absolute ID - 32. Wiring
+     * `qdev_get_gpio_in(gic, 134)` directly (this code's first version)
+     * silently wired OSTM0's line to absolute ID 166, not 134 -- confirmed
+     * the hard way: GICD_ISPENDR4 (covering IDs 128-159) never showed the
+     * bit set no matter how the distributor/CPU-interface/ICFGR were
+     * configured via a manual GDB-driven test (qemu-machine/tools/
+     * test_irq.py), because the line was never reaching an interrupt
+     * inside that window at all. */
+    ostm0 = qdev_new(TYPE_RZA1H_OSTM);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(ostm0), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(ostm0), 0, RZA1H_OSTM0_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(ostm0), 0,
+                       qdev_get_gpio_in(gic, 134 - RZA1H_GIC_NUM_INTERNAL));
+
+    /* OSTM1 -- found needing this same session: base.dat's GPIO-pin-settle
+     * routine (FUN_2002b878, see emu/peripherals/gpio.py's docstring for
+     * the Unicorn-side trace of this exact function) busy-waits on OSTM1's
+     * CNT register as a timeout guard. Interrupt ID 135 is Renesas's
+     * INTC_ID_OSTM1TINT, wired for symmetry with OSTM0 though this
+     * particular caller only polls CNT and never takes the interrupt. */
+    ostm1 = qdev_new(TYPE_RZA1H_OSTM);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(ostm1), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(ostm1), 0, RZA1H_OSTM1_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(ostm1), 0,
+                       qdev_get_gpio_in(gic, 135 - RZA1H_GIC_NUM_INTERNAL));
+
+    for (i = 0; i < ARRAY_SIZE(rza1h_io_regions); i++) {
+        const struct RzA1hIoRegion *r = &rza1h_io_regions[i];
+        create_unimplemented_device(r->name, r->base, r->size);
+    }
+
+    /* SPIBSC0 + boot flash (spibsc.c; replaced spi_boot.c's CMNSR-only stub 2026-09-25 so the
+     * SD updater can program flash). Mapped on top of the "spi-status-and-neighbors"
+     * unimplemented-device region above (priority -1000, so this mapping wins). */
+    spibsc = qdev_new(TYPE_RZA1H_SPIBSC);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(spibsc), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(spibsc), 0, RZA1H_SPIBSC_BASE, 0);
+
+    /* wdt.c -- the watchdog-forced restart after a firmware update -- and stbc.c, the
+     * module-standby handshake the graphics shutdown on power-off waits on. Both sit inside
+     * the plain "rza1h.cpg-main" RAM region (0xFCFE0000-0x04FF, priority 0), so they are
+     * mapped above it: underneath, their writes just landed in RAM. */
+    {
+        DeviceState *wdt = qdev_new(TYPE_RZA1H_WDT);
+        DeviceState *stbc = qdev_new(TYPE_RZA1H_STBC);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(wdt), &error_fatal);
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(wdt), 0, RZA1H_WDT_BASE, 1);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(stbc), &error_fatal);
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(stbc), 0, RZA1H_STBC_BASE, 1);
+    }
+
+    /* Extension-roadmap item 3, 2026-09-08: port the remaining Unicorn-side
+     * peripherals (emu/peripherals/{gpio,cpg,l2c,mtu2,riic}.py) to real
+     * devices here, now that (1) real IRQ delivery and (2) body.bin's real
+     * tick source are both confirmed working -- see README.md's Status
+     * section. gpio.c/l2c.c carry real behavior (masked set/clear
+     * registers, PL310 cache-ID/REG7 semantics) so they're dedicated
+     * devices; cpg/riic were plain storage, covered by
+     * add_plain_ram_region() (see its own comment) -- riic.c was later
+     * upgraded to a real device the same session, and mtu2.c on
+     * 2026-09-09 (channel 3 only, see its own comment). */
+    gpio = qdev_new(TYPE_RZA1H_GPIO);
+    /* A stable QOM path, /machine/gpio, for the tools' PWRK qom-set (an auto-numbered
+     * /machine/unattached/device[N] shifts whenever a device is added before it). */
+    object_property_add_child(OBJECT(machine), "gpio", OBJECT(gpio));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(gpio), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(gpio), 0, RZA1H_GPIO_BASE, 0);
+
+    /* INTC external-IRQ front-end (ICR1/IRQRR), 2026-09-20 -- a second, separate MMIO
+     * region + IRQ output on the same gpio.c device (its own real hardware domain, the
+     * P1_7/PWRK pin), added once live PWRK-press testing needed IRQ7 (GIC ID 39) to
+     * actually reach the CPU instead of only changing a passively-read register -- see
+     * gpio.c's own plate comment for the real, confirmed base-address derivation. */
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(gpio), 1, RZA1H_INTC_EXT_BASE, 0);
+    sysbus_connect_irq(SYS_BUS_DEVICE(gpio), 0,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_EXT_IRQ7_IRQ - RZA1H_GIC_NUM_INTERNAL));
+    sysbus_connect_irq(SYS_BUS_DEVICE(gpio), 1,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_EXT_IRQ3_IRQ - RZA1H_GIC_NUM_INTERNAL));
+
+    /* l2c.c's own address (0x3ffff000) isn't inside any unimplemented-device
+     * range above -- it was simply unmapped before this, so a plain (non-
+     * overlap) mapping is correct and sufficient here. */
+    l2c = qdev_new(TYPE_RZA1H_L2C);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(l2c), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(l2c), 0, RZA1H_L2C_BASE);
+
+    add_plain_ram_region(sysmem, "rza1h.cpg-main",
+                         RZA1H_CPG_MAIN_BASE, RZA1H_CPG_MAIN_SIZE);
+    add_plain_ram_region(sysmem, "rza1h.cpg-deep-standby",
+                         RZA1H_CPG_DEEP_STANDBY_BASE, RZA1H_CPG_DEEP_STANDBY_SIZE);
+
+    /* VDC50 (real LCD/display controller, base+register layout confirmed against
+     * rza1.svd) + LVDS (its output serializer, a small sub-block at the same
+     * page, +0x630) -- 2026-09-20, found via `-d unimp` tracing: firmware genuinely
+     * configures multiple graphics planes (GR0-3, GR_VIN, GR_OIR) during boot, previously
+     * silently swallowed by the generic unimplemented-device catch-all (writes discarded,
+     * reads always 0) with zero way to inspect what firmware actually configured. No real
+     * display/timing/compositing behavior is modeled here -- same "accept any config,
+     * remember it, no side effects" convention as CPG above -- but unlike the generic
+     * catch-all, a plain RAM region actually STORES writes, so external tools (see
+     * tools/vdc5_framebuffer_peek.py) can read back GRn_FLM2 (framebuffer base)/FLM3
+     * (stride)/FLM6 (format+width) via QMP and decode the real guest-RAM framebuffer
+     * firmware points a graphics plane at -- a real, non-invasive way to see what the
+     * radio would actually be showing on its LCD, without modeling VDC5's own compositing/
+     * scaling/timing pipeline at all.
+     *
+     * 2026-09-23: upgraded from that plain RAM region to vdc5.c -- same register storage, plus
+     * a 60 Hz frame-timing interrupt source (GIC 75..97). ui_graphics_present_frame blocks on
+     * the GR3 VLINE interrupt after every swap; without it the very first real frame (the boot
+     * splash) deadlocked the render task. Full derivation in vdc5.c's own file comment. */
+    vdc5 = qdev_new(TYPE_RZA1H_VDC5);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(vdc5), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(vdc5), 0, RZA1H_VDC50_BASE);
+    for (i = 0; i < 23; i++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(vdc5), i,
+                           qdev_get_gpio_in(gic, RZA1H_VDC50_IRQ_BASE + i -
+                                                 RZA1H_GIC_NUM_INTERNAL));
+    }
+
+    /* mtu2.c -- upgraded from a bare RAM region to a real device, 2026-09-09,
+     * once body.bin's own cold-boot task-readiness busy-wait was found
+     * depending on a real periodic interrupt (GIC ID 154, TGI3A) that only
+     * a real MTU2 channel 3 can produce -- see mtu2.c's own comment.
+     * Channel 4's TGI4A (GIC ID 159) added the same session, once the
+     * DSP-link handshake right after was found needing it too. TGI4B (GIC
+     * ID 160) added 2026-09-20, once the RIIC2 ring-overflow fix (riic.c)
+     * let boot reach the internal tuner relay-network's own cold-boot
+     * init, which needs it -- see mtu2.c's own comment. TGI4D (GIC ID 162)
+     * added 2026-09-21 (icom-main-idle-loop-not-reached thread): it's
+     * rspi2_wait_ready's own registered completion handler for event 0xa2,
+     * and rspi2_wait_ready is what actually calls shared_job_ring_dispatch
+     * again after rspi2_transmit's own ring job (job_type 3) finishes --
+     * without it, nothing ever re-invokes the dispatcher to notice the
+     * ring has drained, so its "ring now empty" flag-clear (main_idle_
+     * loop's own entry-wait gate, 0x203906ed) never runs even once the
+     * ring genuinely is empty. See mtu2.c's own comment. */
+    if (rza1h_board_ic705()) {
+        ic705_create_mtu2(gic);                 /* qemu/ic705/mtu2_timer.c */
+        goto mtu2_done;
+    }
+    mtu2 = qdev_new(TYPE_RZA1H_MTU2);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
+    sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 0,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_MTU2_TGI3A_IRQ - RZA1H_GIC_NUM_INTERNAL));
+    sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 1,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_MTU2_TGI4A_IRQ - RZA1H_GIC_NUM_INTERNAL));
+    sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 2,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_MTU2_TGI4B_IRQ - RZA1H_GIC_NUM_INTERNAL));
+    sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 3,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_MTU2_TGI4C_IRQ - RZA1H_GIC_NUM_INTERNAL));
+    sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 4,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_MTU2_TGI4D_IRQ - RZA1H_GIC_NUM_INTERNAL));
+    sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 5,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_MTU2_TGI1A_IRQ - RZA1H_GIC_NUM_INTERNAL));
+mtu2_done:
+
+    /* riic.c -- upgraded from a bare RAM region to a real device,
+     * 2026-09-08 second pass, once body.bin's own cold-boot RIIC2 read
+     * was found busy-waiting forever on this channel's completion
+     * interrupt with no way for it to ever fire (see riic.c's own
+     * comment and README.md). All 3 channels wired identically (only
+     * RIIC2's read is confirmed exercised by any currently-traced boot
+     * path, but the other two cost nothing extra to wire correctly too). */
+    for (ch = 0; ch < 3; ch++) {
+        DeviceState *riic = qdev_new(TYPE_RZA1H_RIIC);
+        hwaddr base = RZA1H_RIIC0_BASE + ch * RZA1H_RIIC_STRIDE;
+        int irq_base = RZA1H_RIIC_IRQ_BASE0 + ch * RZA1H_RIIC_IRQ_STRIDE;
+        int j;
+
+        qdev_prop_set_uint32(riic, "channel", ch);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(riic), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(riic), 0, base);
+        for (j = 0; j < 6; j++) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(riic), j,
+                               qdev_get_gpio_in(gic,
+                                   irq_base + j - RZA1H_GIC_NUM_INTERNAL));
+        }
+    }
+
+    /* Extension-roadmap item 4: eight real SCIF UARTs, matching real
+     * hardware addresses/count (see rz_a1h.h). serial_hd(i) hands channel
+     * i whichever `-serial`/`-chardev` backend the command line gave it,
+     * or NULL (scif.c's own CharBackend handling degrades gracefully --
+     * TX is always logged regardless, see its own comment). */
+    for (i = 0; i < RZA1H_SCIF_COUNT; i++) {
+        DeviceState *scif = qdev_new(TYPE_RZA1H_SCIF);
+
+        qdev_prop_set_uint32(scif, "channel", i);
+        qdev_prop_set_chr(scif, "chardev", serial_hd(i));
+        /* The front-panel control socket (scif.c's virtual front panel, tools/fp.py):
+         * `-chardev socket,id=fpctl,...` attaches to channel 3 only. */
+        if (i == 3 && qemu_chr_find("fpctl")) {
+            qdev_prop_set_chr(scif, "fpctl", qemu_chr_find("fpctl"));
+        }
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(scif), &error_fatal);
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 0,
+                                RZA1H_SCIF0_BASE + i * RZA1H_SCIF_STRIDE, 0);
+        if (i == 3) {
+            scif3 = scif;
+        }
+        if (i == 2 && rza1h_board_ic705() && !serial_hd(i)) {
+            ic705_gnss_attach(scif);            /* qemu/ic705/gnss.c */
+        }
+        sysbus_connect_irq(SYS_BUS_DEVICE(scif), 0,
+                           qdev_get_gpio_in(gic,
+                               RZA1H_SCIF_TXI_BASE0 + i * RZA1H_SCIF_TXI_STRIDE
+                                   - RZA1H_GIC_NUM_INTERNAL));
+        sysbus_connect_irq(SYS_BUS_DEVICE(scif), 1,
+                           qdev_get_gpio_in(gic,
+                               RZA1H_SCIF_RXI_BASE0 + i * RZA1H_SCIF_RXI_STRIDE
+                                   - RZA1H_GIC_NUM_INTERNAL));
+        /* Channel 5's second MMIO region (see scif.c's own comment and
+         * rz_a1h.h's RZA1H_SCIF5_DSP_RETRY_ARM_BASE) -- every other
+         * channel leaves it created but unmapped, a normal, inert QEMU
+         * idiom (rza1h_scif_init's own comment explains why it can't be
+         * skipped at creation time instead). */
+        if (i == 5 && !rza1h_board_ic705()) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 1,
+                                    RZA1H_SCIF5_DSP_RETRY_ARM_BASE, 0);
+        }
+    }
+
+    /* Extension-roadmap item 5: real MMCIF command/response/data protocol,
+     * see mmc.c's own comment. */
+    mmc = qdev_new(TYPE_RZA1H_MMC);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(mmc), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mmc), 0, RZA1H_MMC_BASE, 0);
+
+    /* dmac.c -- channel 0 only, added 2026-09-09 once cold_boot_hw_init's
+     * init chain was found depending on a real DMA-completion interrupt
+     * right after MTU2 channel 3 (see mtu2.c and dmac.c's own comments).
+     * Overlap-mapped: sits inside the broader "io-e8200000"
+     * unimplemented-device catch-all above. */
+    dmac = qdev_new(TYPE_RZA1H_DMAC);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dmac), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dmac), 0, RZA1H_DMAC_BASE, 0);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dmac), 0,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_DMAC_CH0_IRQ - RZA1H_GIC_NUM_INTERNAL));
+    /* ch1..7 -> DMAINT1..7 (2026-09-24, RSPI2 sweep reads, see dmac.c) */
+    for (int dch = 1; dch < RZA1H_DMAC_CHANNELS; dch++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(dmac), dch,
+                           qdev_get_gpio_in(gic, RZA1H_DMAC_CH0_IRQ + dch -
+                                                 RZA1H_GIC_NUM_INTERNAL));
+    }
+
+    if (rza1h_board_ic705()) {
+        ic705_create_dmac_ch8_15(gic);          /* qemu/ic705/dmac_ch8_15.c */
+    }
+
+    /* sdhi.c -- the SD slot body.bin actually drives (not MMCIF, see sdhi.c).
+     * The card is upstream's sd-card, backed by `-drive if=sd`; without one
+     * the slot is empty. Overlap-mapped inside "io-e8030000". */
+    {
+        DeviceState *sdhi = qdev_new(TYPE_RZA1H_SDHI);
+        DriveInfo *di = drive_get(IF_SD, 0, 0);
+        DeviceState *card;
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(sdhi), &error_fatal);
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(sdhi), 0, RZA1H_SDHI0_BASE, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(sdhi), 0, qdev_get_gpio_in(gic,
+                           RZA1H_SDHI0_CD_IRQ - RZA1H_GIC_NUM_INTERNAL));
+        sysbus_connect_irq(SYS_BUS_DEVICE(sdhi), 1, qdev_get_gpio_in(gic,
+                           RZA1H_SDHI0_ACCESS_IRQ - RZA1H_GIC_NUM_INTERNAL));
+        sysbus_connect_irq(SYS_BUS_DEVICE(sdhi), 2, qdev_get_gpio_in(gic,
+                           RZA1H_SDHI0_SDIO_IRQ - RZA1H_GIC_NUM_INTERNAL));
+        qdev_connect_gpio_out_named(sdhi, "dma-req", 0,
+                                    qdev_get_gpio_in_named(dmac, "sdhi-dreq", 0));
+        if (di) {
+            card = qdev_new(TYPE_SD_CARD);
+            qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(di), &error_fatal);
+            qdev_realize_and_unref(card, qdev_get_child_bus(sdhi, "sd-bus"), &error_fatal);
+        }
+    }
+
+    /* rspi2.c -- added 2026-09-09 once mtu2.c's own scif5_cmd_transmit_now
+     * rate-limiter fix unblocked the shared DSP-comms ring far enough to
+     * reach a real job-type-3 (RSPI2 transmit) entry (see rspi2.c's own
+     * comment). Overlap-mapped: sits inside the broader "io-e8000000"
+     * unimplemented-device catch-all above. SPRI2 wired 2026-09-24 for the
+     * fake FPGA's sweep reads, see rspi2.c's own comment. */
+    if (rza1h_board_ic705()) {
+        ic705_create_rspi(gic);                 /* qemu/ic705/rspi.c and its devices */
+        goto rspi_done;
+    }
+    rspi2 = qdev_new(TYPE_RZA1H_RSPI2);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(rspi2), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(rspi2), 0, RZA1H_RSPI2_BASE, 0);
+    sysbus_connect_irq(SYS_BUS_DEVICE(rspi2), 0,
+                       qdev_get_gpio_in(gic, RZA1H_RSPI2_SPRI_IRQ -
+                                             RZA1H_GIC_NUM_INTERNAL));
+
+rspi_done:
+    /* ssif.c -- SSIF0/1, the CPU end of the DSP audio link (2026-09-24, see ssif.c).
+     * Overlap-mapped inside "io-e8200000"; no IRQs (the firmware polls DMAC CHSTAT). */
+    {
+        DeviceState *ssif = qdev_new(TYPE_RZA1H_SSIF);
+        /* /machine/ssif: the stimulus-file/tone properties are set over QMP there. */
+        object_property_add_child(OBJECT(machine), "ssif", OBJECT(ssif));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ssif), &error_fatal);
+        /* the fake DSP's RTTY demodulator drives P8_7 (RTD) */
+        qdev_connect_gpio_out_named(ssif, "rtd", 0, qdev_get_gpio_in_named(gpio, "rtd", 0));
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(ssif), 0, RZA1H_SSIF_BASE, 0);
+    }
+
+    /* openvg.c -- added 2026-09-21 (icom-main-idle-loop-not-reached thread).
+     * The OpenVG graphics processor's completion interrupt (GIC ID 130,
+     * INT0) is what releases the TMO_FEVR event-flag wait inside
+     * slv5_periph_configure; without it ui_graphics_lifecycle_task never
+     * reaches its own message loop, so the *0x2039064c handshake that
+     * system_mode_request_dispatch blocks on is never acknowledged and boot
+     * deadlocks one call short of main_idle_loop. Full derivation in
+     * openvg.c's own file comment. Overlap-mapped: sits inside the broader
+     * plain-RAM "io-e8100000" region above. */
+    openvg = qdev_new(TYPE_RZA1H_OPENVG);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(openvg), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(openvg), 0, RZA1H_OPENVG_BASE, 1);
+    /* Path tessellator block (2026-09-23), see openvg.c "Path tessellator". */
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(openvg), 1, RZA1H_OPENVG_TESS_BASE, 1);
+    sysbus_connect_irq(SYS_BUS_DEVICE(openvg), 0,
+                       qdev_get_gpio_in(gic,
+                           RZA1H_OPENVG_INT0_IRQ - RZA1H_GIC_NUM_INTERNAL));
+
+    /* adc.c -- added 2026-09-21, continued (OpenVG-rendering thread). Found via a
+     * `-d unimp` steady-state survey: the ADC is the only region still touched continuously deep
+     * into steady-state boot (every other unimplemented region is one-time config). Full
+     * derivation in adc.c's own file comment. Overlap-mapped: sits inside the broader
+     * "io-e8000000" unimplemented-device catch-all above. */
+    adc = qdev_new(rza1h_board_ic705() ? TYPE_IC705_ADC : TYPE_RZA1H_ADC);
+    object_property_add_child(OBJECT(machine), "adc", OBJECT(adc));  /* QOM /machine/adc */
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(adc), 0, RZA1H_ADC_BASE, 1);
+
+    if (rza1h_board_ic705()) {
+        ic705_board_init(machine, cpu, gic, gpio, scif3);  /* qemu/ic705/board.c */
+    }
+
+    qemu_register_reset(rza1h_cpu_reset, cpu);
+}
+
+static void rza1h_machine_init(MachineClass *mc)
+{
+    mc->desc = "IC-7300 / IC-705 (RZA1H_BOARD=ic705) Renesas RZ/A1H (research, incomplete)";
+    mc->init = rza1h_init;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a9");
+    mc->max_cpus = 2;   /* A9 + IC-705 sub-CPU (Cortex-M0, own cluster) */
+    mc->default_cpus = 1;
+    mc->default_ram_size = RZA1H_RAM_SIZE;
+    mc->default_ram_id = "rza1h.ram";
+}
+
+/* DEFINE_MACHINE_ARM (not the plain DEFINE_MACHINE) -- confirmed necessary
+ * by directly tracing why a plain DEFINE_MACHINE-registered "rz-a1h-machine"
+ * QOM type was real (present in `qom-list-types implements=machine`) but
+ * invisible to `-M help`/`-M rz-a1h`: qemu-system-arm's machine lookup
+ * (system/vl.c's find_machine(), via target_machine_typename()) walks
+ * TYPE_TARGET_ARM_MACHINE specifically, not plain TYPE_MACHINE -- every
+ * real ARM board in this QEMU tree uses this same macro (or the older
+ * manual TypeInfo + arm_machine_interfaces[] equivalent), never bare
+ * DEFINE_MACHINE. See include/hw/arm/machines-qom.h. */
+DEFINE_MACHINE_ARM("rz-a1h", rza1h_machine_init)

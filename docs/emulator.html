@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IC-705 模拟器原理</title>
+<style>
+:root {
+  --bg: #fbfaf7; --fg: #1d1f23; --muted: #5d636e; --line: #dcd9d1;
+  --card: #ffffff; --accent: #b4441d; --accent-soft: #f6e6dd;
+  --ok: #2f7a3d; --warn: #9a6a00; --bad: #a23030; --code: #f1efe9;
+  --cpu: #e3ecf7; --dev: #eaf3e4; --ext: #f7ecdc; --sw: #efe7f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17181b; --fg: #e6e4df; --muted: #a2a6ad; --line: #34363c;
+    --card: #1f2125; --accent: #ec8a5c; --accent-soft: #3a2a22;
+    --ok: #79c487; --warn: #e0b54c; --bad: #e57a7a; --code: #26282d;
+    --cpu: #1f2b3a; --dev: #22301f; --ext: #352b1d; --sw: #2e2537;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17181b; --fg: #e6e4df; --muted: #a2a6ad; --line: #34363c;
+  --card: #1f2125; --accent: #ec8a5c; --accent-soft: #3a2a22;
+  --ok: #79c487; --warn: #e0b54c; --bad: #e57a7a; --code: #26282d;
+  --cpu: #1f2b3a; --dev: #22301f; --ext: #352b1d; --sw: #2e2537;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.75 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+}
+.wrap { max-width: 920px; margin: 0 auto; padding: 32px 16px 80px; }
+header { border-bottom: 2px solid var(--fg); padding-bottom: 18px; margin-bottom: 28px; }
+h1 { font-size: 2rem; margin: 0 0 6px; letter-spacing: .02em; }
+.sub { color: var(--muted); margin: 0; }
+h2 { font-size: 1.35rem; margin: 48px 0 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+h2 .n { color: var(--accent); margin-right: .4em; font-variant-numeric: tabular-nums; }
+h3 { font-size: 1.08rem; margin: 26px 0 8px; }
+p, li { max-width: 70ch; }
+a { color: var(--accent); }
+code, kbd { font-family: "Cascadia Mono", Consolas, "SFMono-Regular", monospace; font-size: .88em;
+  background: var(--code); padding: .1em .35em; border-radius: 4px; }
+pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: .86rem; line-height: 1.55; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 18px; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; background: var(--accent-soft); }
+.tbl { overflow-x: auto; }
+.note { background: var(--accent-soft); border-left: 4px solid var(--accent); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+.toc { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; }
+.toc ol { margin: 0; padding-left: 1.3em; }
+.tag { display: inline-block; font-size: .78rem; font-weight: 600; padding: 0 .5em; border-radius: 4px; border: 1px solid currentColor; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.diagram { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 14px 0; overflow-x: auto; }
+.diagram svg { display: block; width: 100%; min-width: 640px; height: auto; }
+.diagram text { font-family: inherit; fill: var(--fg); }
+.diagram .small { font-size: 11px; fill: var(--muted); }
+.box-cpu { fill: var(--cpu); stroke: var(--fg); }
+.box-dev { fill: var(--dev); stroke: var(--fg); }
+.box-ext { fill: var(--ext); stroke: var(--fg); }
+.box-sw  { fill: var(--sw);  stroke: var(--fg); }
+.wire { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+.steps { counter-reset: s; list-style: none; padding: 0; }
+.steps li { counter-increment: s; position: relative; padding-left: 2.4em; margin: 10px 0; }
+.steps li::before { content: counter(s); position: absolute; left: 0; top: .1em; width: 1.7em; height: 1.7em;
+  border-radius: 50%; background: var(--accent); color: var(--bg); font-weight: 700; text-align: center; line-height: 1.7em; font-size: .85em; }
+.legend span { margin-right: 14px; font-size: .85rem; }
+.legend i { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--fg); vertical-align: -1px; margin-right: 4px; }
+footer { margin-top: 56px; color: var(--muted); font-size: .85rem; border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>IC-705 模拟器原理</h1>
+  <p class="sub">在 QEMU 里跑原版 Icom IC-705 固件：工作方式、硬件仿真的实现方法与性能优化</p>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#overview">一句话说明</a></li>
+    <li><a href="#arch">整体架构</a></li>
+    <li><a href="#flow">从固件包到屏幕</a></li>
+    <li><a href="#real">怎样做到“真正的硬件仿真”</a></li>
+    <li><a href="#devices">外设模型一览</a></li>
+    <li><a href="#time">时间模型与性能</a></li>
+    <li><a href="#gaps">尚未仿真的部分</a></li>
+    <li><a href="#extend">如何继续扩展</a></li>
+    <li><a href="#ref">参数与环境变量</a></li>
+  </ol>
+</nav>
+
+<h2 id="overview"><span class="n">1</span>一句话说明</h2>
+<p>
+这个模拟器<strong>不重写电台的功能</strong>，而是在电脑上虚拟出一台 IC-705 的主板：
+CPU、内存、闪存、GPIO、SPI、I²C、串口、LCD 控制器、定时器、中断控制器，以及一颗副 CPU。
+然后把 Icom 官方固件原封不动地放进去运行。屏幕上看到的每个像素、菜单、开机动画，都是原版固件自己画出来的。
+</p>
+<div class="note">
+关键原则：<strong>固件一条指令都不改，也不在固件里打钩子（hook）</strong>。
+固件读写的每个硬件寄存器，都由一个按真实芯片行为编写的“外设模型”来响应。
+只要模型的行为和真芯片一致，固件就分辨不出自己跑在模拟器里。
+</div>
+
+<h2 id="arch"><span class="n">2</span>整体架构</h2>
+<p>真实电台里有好几颗处理器。模拟器目前对它们的处理方式如下：</p>
+
+<div class="diagram">
+<svg viewBox="0 0 860 420" role="img" aria-label="模拟器架构图">
+  <!-- host -->
+  <rect x="10" y="10" width="190" height="400" rx="10" class="box-sw"/>
+  <text x="105" y="36" text-anchor="middle" font-weight="700">宿主机（WSL2）</text>
+  <rect x="25" y="55" width="160" height="56" rx="6" class="box-sw"/>
+  <text x="105" y="78" text-anchor="middle">705E140.dat</text>
+  <text x="105" y="97" text-anchor="middle" class="small">Icom 官方固件包</text>
+  <rect x="25" y="135" width="160" height="56" rx="6" class="box-sw"/>
+  <text x="105" y="158" text-anchor="middle">decoder/</text>
+  <text x="105" y="177" text-anchor="middle" class="small">解密、解压、拆分</text>
+  <rect x="25" y="215" width="160" height="70" rx="6" class="box-sw"/>
+  <text x="105" y="238" text-anchor="middle">ic705.py 启动器</text>
+  <text x="105" y="256" text-anchor="middle" class="small">拼闪存、设环境变量</text>
+  <text x="105" y="272" text-anchor="middle" class="small">QMP 按 POWER</text>
+  <rect x="25" y="310" width="160" height="80" rx="6" class="box-sw"/>
+  <text x="105" y="335" text-anchor="middle">GTK 窗口</text>
+  <text x="105" y="354" text-anchor="middle" class="small">LCD 画面 / 鼠标=触摸</text>
+  <text x="105" y="371" text-anchor="middle" class="small">滚轮=主旋钮 / 键盘=按键</text>
+  <path class="wire" d="M105 111 V135 M105 191 V215"/>
+
+  <!-- qemu machine -->
+  <rect x="220" y="10" width="630" height="400" rx="10" fill="none" stroke="currentColor" stroke-dasharray="5 4"/>
+  <text x="535" y="36" text-anchor="middle" font-weight="700">QEMU 机器 rz-a1h（RZA1H_BOARD=ic705）</text>
+
+  <rect x="240" y="55" width="200" height="90" rx="8" class="box-cpu"/>
+  <text x="340" y="80" text-anchor="middle" font-weight="600">主 CPU：Cortex-A9</text>
+  <text x="340" y="100" text-anchor="middle" class="small">RZ/A1H，原版主程序</text>
+  <text x="340" y="117" text-anchor="middle" class="small">Keil RTX、界面、协议</text>
+  <text x="340" y="134" text-anchor="middle" class="small">TCG 动态翻译执行</text>
+
+  <rect x="630" y="55" width="200" height="90" rx="8" class="box-cpu"/>
+  <text x="730" y="80" text-anchor="middle" font-weight="600">副 CPU：Cortex-M0+</text>
+  <text x="730" y="100" text-anchor="middle" class="small">STM32L051，原版 aux2</text>
+  <text x="730" y="117" text-anchor="middle" class="small">按键扫描、电源、版本</text>
+  <text x="730" y="134" text-anchor="middle" class="small">同一 QEMU 进程第二个 CPU</text>
+
+  <rect x="240" y="170" width="590" height="120" rx="8" class="box-dev"/>
+  <text x="535" y="193" text-anchor="middle" font-weight="600">寄存器级外设模型（qemu/machine/*.c）</text>
+  <text x="255" y="218" class="small">GIC 中断 · OSTM/MTU2 定时器 · WDT · DMAC · L2C</text>
+  <text x="255" y="238" class="small">GPIO（引脚电平、握手线、按键编码器）· ADC（按键电阻梯）</text>
+  <text x="255" y="258" class="small">RSPI0–4（SPI，RSPI4 挂 SPI-NOR 闪存）· RIIC0–2（EEPROM、充电芯片、RTC）· SCIF</text>
+  <text x="255" y="278" class="small">VDC5 显示合成 · OpenVG 光栅化 · SPIBSC 外部闪存 · SDHI · 触摸屏 ADC</text>
+  <path class="wire" d="M340 145 V170 M730 145 V170"/>
+  <path class="wire" d="M440 100 H630"/>
+  <text x="535" y="92" text-anchor="middle" class="small">SCIF3 同步串口 ⇄ SPI1 从机 + 4 根握手线</text>
+
+  <rect x="240" y="310" width="180" height="80" rx="8" class="box-ext"/>
+  <text x="330" y="335" text-anchor="middle" font-weight="600">FPGA</text>
+  <text x="330" y="355" text-anchor="middle" class="small">只模拟配置握手</text>
+  <text x="330" y="372" text-anchor="middle" class="small">（行为模型）</text>
+  <rect x="445" y="310" width="180" height="80" rx="8" class="box-ext"/>
+  <text x="535" y="335" text-anchor="middle" font-weight="600">主 DSP（SHARC）</text>
+  <text x="535" y="355" text-anchor="middle" class="small">默认：只应答启动</text>
+  <text x="535" y="372" text-anchor="middle" class="small">只应答版本握手</text>
+  <rect x="650" y="310" width="180" height="80" rx="8" class="box-ext"/>
+  <text x="740" y="335" text-anchor="middle" font-weight="600">DV DSP（C5517）</text>
+  <text x="740" y="355" text-anchor="middle" class="small">默认未接</text>
+  <text x="740" y="372" text-anchor="middle" class="small">只应答版本握手</text>
+  <path class="wire" d="M330 290 V310 M535 290 V310 M740 290 V310"/>
+  <path class="wire" d="M185 250 H240"/>
+</svg>
+<div class="legend">
+  <span><i style="background:var(--cpu)"></i>运行原版固件的 CPU</span>
+  <span><i style="background:var(--dev)"></i>寄存器级外设模型</span>
+  <span><i style="background:var(--ext)"></i>简化或可选的芯片</span>
+  <span><i style="background:var(--sw)"></i>宿主侧程序</span>
+</div>
+</div>
+
+<div class="tbl"><table>
+  <tr><th>真实芯片</th><th>型号</th><th>模拟器里的状态</th></tr>
+  <tr><td>主 CPU</td><td>Renesas RZ/A1H（Cortex-A9）</td><td><span class="tag ok">原版固件</span> QEMU 翻译执行</td></tr>
+  <tr><td>副 CPU</td><td>ST STM32L051R8（Cortex-M0+）</td><td><span class="tag ok">原版固件</span> 同一进程的第二个 CPU</td></tr>
+  <tr><td>主 DSP（IF-DSP）</td><td>ADI ADSP-21478 SHARC</td><td><span class="tag warn">只应答启动</span> 可选接 Python 仿真器</td></tr>
+  <tr><td>DV DSP</td><td>TI TMS320C5517</td><td><span class="tag warn">默认未接</span> 可选接 Python 仿真器</td></tr>
+  <tr><td>FPGA</td><td>Intel Cyclone 10 LP</td><td><span class="tag warn">只模拟配置握手</span></td></tr>
+  <tr><td>射频、音频编解码、Wi-Fi、蓝牙、GPS</td><td>—</td><td><span class="tag bad">未模拟</span></td></tr>
+</table></div>
+
+<h2 id="flow"><span class="n">3</span>从固件包到屏幕</h2>
+<h3>3.1 准备固件（<code>decoder/</code> + <code>ic705.py</code>）</h3>
+<ol class="steps">
+  <li>读取 Icom 的 <code>705E140.dat</code>。它是加密、压缩后的打包格式。</li>
+  <li><code>decoder/ic705_decode.py</code> 解密（autokey）、LZSS 解压，拆出各个部分：主程序区、副 CPU 程序 <code>aux2</code>、DSP/FPGA 组 <code>dsp.image.bin</code>、WLAN 固件。</li>
+  <li>启动器按真机闪存布局拼出 16 MiB 的 <code>flash.bin</code>：主程序放在 0 地址，字体和图片资源放在 <code>0xC00000</code>。这就是主 CPU 上电后从 <code>0x18000000</code> 读到的 QSPI 闪存内容。</li>
+  <li>结果缓存在 <code>~/.local/state/ic705/&lt;固件哈希&gt;/</code>。同一目录里还有 <code>eeprom.bin</code>，保存电台设置。</li>
+</ol>
+
+<h3>3.2 上电与开机（全部由原版固件完成）</h3>
+<ol class="steps">
+  <li><strong>复位</strong>：主 CPU 从闪存里的引导程序开始执行，把加载器复制到 <code>0x20004000</code>，再把主程序解压到 RAM <code>0x20005000</code>。</li>
+  <li><strong>深度待机</strong>：没有检测到开机原因时，固件让芯片进入深度待机（WFI 停在 <code>0x2007848C</code>），副 CPU 也进入 STOP 睡眠。</li>
+  <li><strong>按 POWER</strong>：启动器通过 QMP 把 P3_9 拉低 3 秒。模型按真芯片的行为做“深度待机解除”：复位 A9，并在 DSFR 寄存器里记下唤醒原因是 POWER 键。如果 EEPROM 里记着上次是开机状态，固件会自己开机，启动器就不再按键。</li>
+  <li><strong>完整初始化</strong>：Keil RTX 实时系统启动各个任务，依次完成：
+    <ul>
+      <li>按 Altera 被动串行时序配置 FPGA（nCONFIG / nSTATUS / CONF_DONE）；</li>
+      <li>通过 GPIO 模拟的软件 I²C 从 EEPROM 读出约 104 KB 设置；</li>
+      <li>通过 RSPI3 发命令、从 RSPI4 闪存把程序流式送进主 DSP，等 P7_7 应答；</li>
+      <li>通过 SCIF3 与副 CPU 握手，副 CPU 报告版本 <code>1.20-E00</code>；</li>
+      <li>初始化充电芯片、RTC、触摸屏、ADC 按键电阻梯等。</li>
+    </ul>
+  </li>
+  <li><strong>显示</strong>：固件用 OpenVG 绘制界面，再由 VDC5 合成到 480×272 的帧缓冲。QEMU 把帧缓冲显示在 GTK 窗口里。先出现 ICOM 开机画面，然后是主界面。</li>
+</ol>
+
+<h2 id="real"><span class="n">4</span>怎样做到“真正的硬件仿真”</h2>
+
+<h3>4.1 CPU：动态二进制翻译</h3>
+<p>
+QEMU 的 TCG（Tiny Code Generator）把一小段 ARM 指令（一个“翻译块”，TB）翻译成 x86 机器码，缓存起来反复执行。
+主 CPU 和副 CPU 是同一个 QEMU 进程里的两个 CPU，型号分别是 <code>cortex-a9</code> 和 <code>cortex-m0</code>，各自执行自己的原版固件。
+CPU 本身（指令、异常、MMU、缓存维护指令等）由 QEMU 上游实现，这部分已经很成熟。
+</p>
+
+<h3>4.2 外设：寄存器级模型</h3>
+<p>
+真正的工作量在外设。CPU 访问外设地址（例如 <code>0xFCFE3208</code>）时，QEMU 不访问内存，而是调用对应外设模型的读写函数。
+模型要做的就是<strong>像真芯片一样回应</strong>：
+</p>
+<ul>
+  <li><strong>寄存器语义一致</strong>：同样的地址、同样的位定义、同样的“写 1 清零”“读后清除”等副作用。例如 GPIO 的 PSR 寄存器，高 16 位是写使能、低 16 位是数据。</li>
+  <li><strong>时序一致</strong>：定时器按虚拟时钟计数，中断在正确的时刻触发，SPI 一个字节对应一次收发。</li>
+  <li><strong>引脚级连接</strong>：芯片之间按原理图连线。主 CPU 的 SCIF3 同步串口接到副 CPU 的 SPI1 从机，另有 4 根 GPIO 握手线；按键电阻梯接到 ADC；触摸屏是 GPIO 上软件模拟的 SPI。</li>
+  <li><strong>外部器件模型</strong>：I²C EEPROM（24M02 类，256 KiB，写入持久化到文件）、充电芯片（BQ2571x 类）、RTC（RX-8803）、SPI-NOR 闪存（IS25LP128）、触摸屏 ADC（TSC2046 类）。</li>
+</ul>
+
+<h3>4.3 模型从哪来：用固件本身做“规格书”</h3>
+<p>
+Icom 不公开电路细节，RZ/A1H 和 STM32 的芯片手册也只说明芯片本身，不说明板上怎么连。
+所以每个模型都是先从<strong>固件代码</strong>里读出来的：固件往哪个寄存器写什么值、等哪个状态位、在哪个中断里处理什么。
+例如 FPGA 配置握手：
+</p>
+<pre><code>0x2011D1F4  str  r6, [r7, #0x108]     ; PSR2 = 0x40004 → P2_2 (nCONFIG) 拉高
+0x2011D220  ldrh r0, [r5, #8]         ; 读 PPR2（0xFCFE3208）
+0x2011D224  tst  r0, #8               ; 等 P2_3 (nSTATUS) 为高
+...
+0x2011D28C  tst  r0, #0x80            ; 等 P2_7 (CONF_DONE) 为高
+</code></pre>
+<p>
+从这几条指令就能确定引脚分配和握手顺序，再对照 Altera 被动串行配置的公开时序，写出 GPIO 里的 FPGA 配置模型。
+所有结论都标注证据来源：
+</p>
+<div class="tbl"><table>
+  <tr><th>标签</th><th>含义</th></tr>
+  <tr><td><code>[FW]</code></td><td>直接从固件字节或反汇编读出（静态、确定）</td></tr>
+  <tr><td><code>[VM]</code></td><td>在模拟器里观察到（不一定是真机行为）</td></tr>
+  <tr><td><code>[EXT]</code></td><td>外部资料：维修手册、芯片手册、其他项目</td></tr>
+  <tr><td><code>[INF]</code></td><td>推断，未验证</td></tr>
+</table></div>
+
+<h3>4.4 验证：拿真实行为做对照</h3>
+<ul>
+  <li><strong>正向对照</strong>：例如单独调用固件里的 CRC32 函数，结果和 zlib 一致，说明 CPU 和内存映射正确。</li>
+  <li><strong>端到端行为</strong>：副 CPU 报出的版本号、设置能写进 EEPROM 并在重启后保留、触摸位置和真机校准一致、主旋钮 100 格 = 1 kHz。</li>
+  <li><strong>不改固件</strong>：任何“为了让它跑起来”的捷径都放在外设模型里，并且有开关，可以随时关掉对比。</li>
+</ul>
+
+<h3>4.5 行为模型与完整模拟的区别</h3>
+<p>
+并不是每颗芯片都值得完整模拟。FPGA 负责射频信号处理，它的比特流是专有格式，没法“执行”。
+对固件来说，只要配置握手的引脚按时序给出回应，后续流程就和真机一样。这类只模拟固件“看得到的那部分行为”的叫<strong>行为模型</strong>。
+主 DSP 的启动应答也属于这一类。真要让 DSP 处理音频，就得运行它自己的固件（见第 7 节）。
+</p>
+
+<h2 id="devices"><span class="n">5</span>外设模型一览</h2>
+<div class="tbl"><table>
+  <tr><th>文件</th><th>模拟的硬件</th><th>IC-705 上的用途</th></tr>
+  <tr><td><code>rz_a1h.c</code></td><td>整机：内存映射、CPU、深度待机、触摸屏、I²C 位操作从机</td><td>机器入口，连接所有设备</td></tr>
+  <tr><td><code>gpio.c</code></td><td>GPIO 端口、外部中断前端</td><td>POWER 键、握手线、编码器、FPGA 配置引脚、EEPROM 位操作</td></tr>
+  <tr><td><code>qemu/ic705/subcpu/</code></td><td>副 CPU STM32L051：每个片上外设一个文件（RCC、FLASH、EXTI、GPIO、TIM、ADC、DMA、SPI、USART）</td><td>副 CPU：按键扫描、与主 CPU 通信</td></tr>
+  <tr><td><code>scif.c</code></td><td>SCIF 串口（含同步模式）</td><td>副 CPU 链路（SCIF3）、CI-V（SCIF1）</td></tr>
+  <tr><td><code>qemu/ic705/rspi.c</code>、<code>spi_flash.c</code>、<code>dsp.c</code>、<code>dv_dsp.c</code>、<code>wlan.c</code></td><td>RSPI0–4 SPI 主机，以及挂在上面的 SPI-NOR 闪存、主 DSP、DV DSP、Wi-Fi 模块</td><td>DSP/FPGA 闪存（RSPI4）、主 DSP 链路（RSPI3）、DV DSP 链路（RSPI0）、Wi-Fi（RSPI1）</td></tr>
+  <tr><td><code>riic.c</code>、<code>m24m02.c</code>、<code>bq2571x.c</code>、<code>rx8803.c</code></td><td>I²C 控制器与挂在上面的器件</td><td>设置 EEPROM、充电芯片、实时时钟</td></tr>
+  <tr><td><code>mtu2g.c</code>、<code>ostm.c</code>、<code>wdt.c</code></td><td>定时器、看门狗</td><td>RTOS 时基、主旋钮（MTU2 相位计数）、ADC 触发</td></tr>
+  <tr><td><code>adc.c</code></td><td>ADC</td><td>按键电阻梯、电源电压检测</td></tr>
+  <tr><td><code>dmac.c</code>、<code>dmac_hi.c</code></td><td>DMA 控制器</td><td>SPI/串口搬运、GPIO 波形输出</td></tr>
+  <tr><td><code>vdc5.c</code>、<code>openvg.c</code></td><td>显示控制器、2D 矢量图形加速</td><td>480×272 界面合成与绘制</td></tr>
+  <tr><td><code>spibsc.c</code>、<code>l2c.c</code>、<code>sdhi.c</code>、<code>mmc.c</code></td><td>QSPI 闪存控制器、L2 缓存、SD 卡</td><td>程序闪存、SD 卡</td></tr>
+</table></div>
+<p>这些文件大部分来自 IC-7300 模拟项目（同一颗 RZ/A1H 芯片），IC-705 移植加上了副 CPU、RSPI、EEPROM 位操作等差异部分。来源见 <code>NOTICE.md</code>。</p>
+
+<h2 id="time"><span class="n">6</span>时间模型与性能</h2>
+
+<h3>6.1 为什么用 icount</h3>
+<p>
+固件里有大量“等某个状态位，超时就放弃”的循环，还有依赖定时器的协议。
+QEMU 的 <code>-icount shift=1</code> 模式让虚拟时间严格由执行的指令数决定（每条指令 2 ns），
+结果完全可复现，也不会因为宿主机忙闲而改变固件看到的时序。代价是：所有 CPU 只能在一个宿主线程里轮流执行。
+</p>
+
+<h3>6.2 开机慢在哪里</h3>
+<p>用 QMP 采样 CPU 的 PC、读 OSTM 计数器换算虚拟时间、用 <code>perf</code> 剖析宿主，得到原版的开机时间线：</p>
+<div class="tbl"><table>
+  <tr><th>阶段</th><th>虚拟时间</th><th>原因</th></tr>
+  <tr><td>等 FPGA 配置（P2_3/P2_7）</td><td>≈ 3.2 秒</td><td>FPGA 不存在，等到超时</td></tr>
+  <tr><td>软件 I²C 读 EEPROM</td><td>≈ 3.0 秒</td><td>真机也要这么久，属正常</td></tr>
+  <tr><td>等主 DSP 启动（P7_7）</td><td>≈ 2.0 秒</td><td>DSP 未运行，等到超时</td></tr>
+  <tr><td>其余初始化</td><td>≈ 0.8 秒</td><td>—</td></tr>
+</table></div>
+<p>
+更严重的是：虚拟时间只有真实时间的 5% 左右。两颗 CPU 都在紧密轮询 GPIO，
+而原版 QEMU 在 icount 模式下每读一次外设寄存器都要“倒回去重新翻译”一次，
+<code>perf</code> 显示真正执行翻译后代码的时间只占百分之几。
+</p>
+
+<h3>6.3 做了哪些优化</h3>
+<div class="tbl"><table>
+  <tr><th>优化</th><th>位置</th><th>原理</th></tr>
+  <tr><td>I/O 指令单独成块</td><td><code>qemu/patches/icount-io.patch</code>（QEMU 核心）</td><td>icount 要求访问外设的指令必须是翻译块的最后一条。原版每次都靠异常回退、查树、恢复状态再重新生成。现在第一次发生后记住这条指令的地址，重新翻译时让它单独结尾，以后直接执行。</td></tr>
+  <tr><td>外设总线等待周期</td><td>同上，<code>--io-wait</code>，默认 128</td><td>真机读外设要走慢速外设总线（约 100–250 ns），icount 却只算 2 ns。每次外设访问额外计入 128 条指令（约 256 ns），轮询循环用更少的次数就能走完同样长的虚拟时间。不越过下一个定时器的截止点，结果仍然确定。</td></tr>
+  <tr><td>按真实主频分配 CPU 时间</td><td><code>qemu/patches/icount-rr.patch</code>，<code>--cpu-weights</code>，<strong>默认关闭（1,1）</strong></td><td>QEMU 把每轮时间平均分给两颗 CPU，32 MHz 的副 CPU 因此跑得和 400 MHz 的主 CPU 一样快，白白占一半时间轮询。按 15:1 分配，亮屏可再提前约 10 秒。但主副 CPU 之间的同步串口（SCIF3 ⇄ SPI1）还没有模拟波特率，副 CPU 一放慢就跟不上握手，会报“副 CPU 工作不正常/版本不一致”，所以暂不默认开启。</td></tr>
+  <tr><td>FPGA 配置握手</td><td><code>qemu/machine/gpio.c</code></td><td>nSTATUS 跟随 nCONFIG，nCONFIG 拉低后再释放即置位 CONF_DONE。去掉约 3 秒虚拟时间的超时。</td></tr>
+  <tr><td>主 DSP 启动应答</td><td><code>qemu/ic705/dsp.c</code></td><td>RSPI3 上看到启动命令 n=1 时拉低 P7_7，n=2 时拉高。去掉约 2 秒的超时。</td></tr>
+</table></div>
+
+<p>效果（8 核 WSL2，单实例）：</p>
+<div class="tbl"><table>
+  <tr><th>版本</th><th>LCD 亮起</th><th>到主界面</th></tr>
+  <tr><td>原版 QEMU</td><td>≈ 150 秒</td><td>&gt; 150 秒</td></tr>
+  <tr><td>+ I/O 指令单独成块</td><td>≈ 99 秒</td><td>≈ 157 秒</td></tr>
+  <tr><td>+ 总线等待周期 128</td><td>≈ 75 秒</td><td>≈ 119 秒</td></tr>
+  <tr><td>+ FPGA 握手 + DSP 启动应答</td><td>≈ 36 秒</td><td>≈ 83 秒</td></tr>
+  <tr><td>+ 定时器按需触发 + 只按可运行 CPU 分时间片</td><td>≈ 14 秒</td><td>≈ 28 秒</td></tr>
+  <tr><td>+ GPIO 读取不拿全局锁（<strong>当前默认</strong>）</td><td>≈ 16 秒*</td><td>≈ 30 秒*</td></tr>
+  </table></div>
+<p>前三项是 QEMU 核心补丁，FPGA/DSP 两项有环境变量开关（见第 9 节），可以单独关闭做对比。</p>
+
+<p>* 这一行是在保存的设置里打开了频谱之后测的，开机会慢一些；同样设置下上一行是 18 秒 / 38 秒。</p>
+
+<h3>6.4 开机之后为什么还是慢：定时器把时间片切碎了</h3>
+<p>
+开机完成后主 CPU 基本空闲，但副 CPU 跑的是一个不停轮询的主循环（单片机固件的常见写法）。用 <code>perf</code> 剖析稳态，
+宿主时间里外设模型本身只占约 5%，翻译后的客户机代码只占 2%，其余全是 QEMU 核心在“退出—查表—拿锁—重新进入”。
+用 <code>exec_tb_exit</code> trace 和临时统计代码查到原因：icount 模式下每个定时器到期都会结束当前时间片，
+而有三个模型在固件并不关心的时候也一直触发定时器：
+</p>
+<div class="tbl"><table>
+  <tr><th>模型</th><th>原来</th><th>现在</th></tr>
+  <tr><td>SCIF3 只接收模式的时钟（<code>rz_a1h.c</code>）</td><td>50 kHz 定时器，从开机一直跑到关机</td><td>只在 SCIF3 处于同步只接收模式时运行，靠 SMR/SCR 写入钩子启停</td></tr>
+  <tr><td>STM32 定时器（<code>qemu/ic705/subcpu/timer.c</code>）</td><td>每个计数周期触发一次</td><td>只有开了中断、TRGO 或单次模式时才预约；SR 标志在固件读写时补算</td></tr>
+  <tr><td>MTU2（<code>mtu2g.c</code>）</td><td>每个比较匹配点都触发（PWM 一个周期最多 4 次）</td><td>只为开了中断的事件预约；计数清零按周期取模推算，TSR 标志在读写时补算</td></tr>
+</table></div>
+<p>
+另外 QEMU 的轮转调度器把“到下一个定时器的时间”平均分给所有 CPU，主 CPU 空闲时它那一半没人用，
+副 CPU 只能跑一半、再一半……逼近一个定时器要十几轮。<code>icount-rr.patch</code> 改成只在可运行的 CPU 之间分配。
+结果：主界面空闲时虚拟时间从真实时间的约 8% 提高到约 25%，开机亮屏从约 36 秒缩短到约 14 秒。
+</p>
+
+<h3>6.5 外设访问的全局锁与多线程</h3>
+<p>
+QEMU 每次外设访问都要拿全局锁（BQL）。两颗 CPU 高频轮询 GPIO，加锁解锁本身就是不小的开销。
+<code>icount-io.patch</code> 让 TCG 的外设访问路径遵守 <code>memory_region_enable_lockless_io()</code>，
+RZ/A1H 的 GPIO 和 STM32 的外设区域打开了这个标志：读 GPIO 只是读状态，不再拿锁；写操作和其他外设仍在设备里自己拿锁。
+打开频谱时，主界面空闲速度从真实时间的约 15% 提高到约 25%。
+</p>
+<p>
+关掉 icount、改用多线程（MTTCG，<code>-accel tcg,thread=multi -smp 1,maxcpus=2</code>）能启动，但固件只给副 CPU 200 微秒真实时间来响应请求。
+WSL2 里唤醒一个线程、交接一次全局锁就要几十到几百微秒，握手经常超时，固件报“副 CPU 工作不正常”。
+icount 模式的时间按指令计算，不受宿主线程调度影响，所以目前仍用 icount。
+</p>
+
+<h2 id="gaps"><span class="n">7</span>尚未仿真的部分</h2>
+<ul>
+  <li><strong>主 DSP 的真实运行</strong>：要执行 SHARC 原版固件，需要一个 SHARC 仿真器。Python 写的仿真器每秒只有约 20 万条指令，比真芯片慢上千倍；要让 DSP 跟上，得用 C 写并直接集成进 QEMU。本仓库不含 DSP 仿真器。</li>
+  <li><strong>DV DSP</strong>（C55x）：同上。</li>
+  <li><strong>音频</strong>：ARM 的 SSIF、SHARC 的 SPORT、DV DSP 的 I²S、编解码芯片之间还没有样本流动。</li>
+  <li><strong>FPGA 数据面</strong>：只有配置握手，没有频谱和中频数据。</li>
+  <li><strong>射频、Wi-Fi、蓝牙、GPS</strong>：不存在。</li>
+  <li><strong>DSP 的版本握手是模拟出来的</strong>：开机时 ARM 会向两颗 DSP 询问版本号。DSP 不运行，<code>qemu/ic705/dsp.c</code> 和 <code>dv_dsp.c</code> 按它们固件的做法代为回答，见 7.1 节。</li>
+</ul>
+
+<h3>7.1 版本握手的行为模型</h3>
+<p>原来开机会弹出 “DSP/FPGA 版本不一致”。原因是版本号由 DSP 自己从 SPI 闪存读出、再报告给 ARM，DSP 不运行，ARM 就收不到。现在 <code>qemu/ic705/dsp.c</code> 和 <code>dv_dsp.c</code> 代为回答，数据全部取自闪存：</p>
+<div class="tbl"><table>
+  <tr><th>链路</th><th>ARM 发出</th><th>模型回答</th></tr>
+  <tr><td>主 DSP（RSPI3，握手线 P7_6）</td><td><code>E000000k</code> 询问，<code>80000000</code> 轮询</td><td>拉高 P7_6，回 <code>F</code> + 第 4 个字符的数字 + 前 3 个字符，例如标签前半 “3060” → <code>F0333036</code>（ARM 显示 “3.06”）。标签在闪存 <code>0x40000</code>（DSP 程序）、<code>0x180000</code>（FPGA）、<code>0x80000</code>（DSP 数据）。与真 SHARC 固件在 Python 仿真器里给出的回复逐字节一致。</td></tr>
+  <tr><td>DV DSP（RSPI0，握手线 P3_8）</td><td><code>03 00 00 FF</code></td><td>拉高 P3_8，回 <code>16 00 "1.11-000" "1.41-000" 01 01 01 01 FF</code>，两个版本字符串取自闪存 DV DSP 区的 UTF-16 字符串</td></tr>
+</table></div>
+<p>主 DSP 的模型同时应答启动命令（<code>020000x0</code>，驱动 P7_7）。<code>RZA1H_IC705_DSP_READY=off</code> 和 <code>RZA1H_IC705_DV_READY=off</code> 可以分别关掉。</p>
+
+<h2 id="extend"><span class="n">8</span>如何继续扩展</h2>
+<ol class="steps">
+  <li><strong>找到固件在等什么</strong>：开机时用 QMP 每隔几百毫秒执行 <code>info registers</code>，统计 PC 的分布，就能找出固件卡在哪里。</li>
+  <li><strong>反汇编那段代码</strong>：<code>arm-none-eabi-objdump -d main.elf --start-address=…</code>，读出它访问的寄存器地址和等待的位。</li>
+  <li><strong>统计外设访问</strong>：QMP 里打开 <code>trace-event memory_region_ops_read on</code>，几秒内就能看出哪个寄存器被读得最多。</li>
+  <li><strong>修改或新增模型</strong>：改 <code>qemu/machine/</code> 下对应的 <code>.c</code> 文件，加 <code>rza1h_debug("名字", …)</code> 输出，用 <code>RZA1H_DEBUG=名字</code> 打开。</li>
+  <li><strong>重新编译</strong>：<code>bash build-qemu.sh</code>，增量编译约 1 分钟。</li>
+  <li><strong>对照验证</strong>：新行为加环境变量开关，开关两种状态各跑一次，比较截图和时间线。</li>
+</ol>
+
+<h2 id="ref"><span class="n">9</span>参数与环境变量</h2>
+<h3>启动器 <code>ic705.py</code></h3>
+<div class="tbl"><table>
+  <tr><th>参数</th><th>默认</th><th>作用</th></tr>
+  <tr><td><code>--io-wait N</code></td><td>128</td><td>每次外设访问额外计入的指令数；0 = 原版 icount</td></tr>
+  <tr><td><code>--cpu-weights A,B</code></td><td>1,1</td><td>主 CPU 和副 CPU 的时间分配；15,1 接近真实主频，但目前会让副 CPU 握手失败</td></tr>
+  <tr><td><code>--clock-shift N</code></td><td>1</td><td>每条指令 2<sup>N</sup> ns</td></tr>
+  <tr><td><code>--screenshot 文件 --seconds S</code></td><td>—</td><td>无窗口运行，S 秒后截图退出</td></tr>
+  <tr><td><code>--prepare</code></td><td>—</td><td>只解码固件，不启动</td></tr>
+</table></div>
+<h3>QEMU 环境变量</h3>
+<div class="tbl"><table>
+  <tr><th>变量</th><th>作用</th></tr>
+  <tr><td><code>QEMU_ICOUNT_IO_WAIT</code></td><td>外设总线等待周期（指令数）；也可以按 CPU 分别设置，如 <code>128,0</code></td></tr>
+  <tr><td><code>QEMU_ICOUNT_RR_WEIGHTS</code></td><td>各 CPU 的时间权重，按 CPU 编号</td></tr>
+  <tr><td><code>RZA1H_IC705_FPGA=off</code></td><td>关闭 FPGA 配置握手模型</td></tr>
+  <tr><td><code>RZA1H_IC705_DSP_READY=off</code></td><td>关闭主 DSP 的启动应答和版本应答</td></tr>
+  <tr><td><code>RZA1H_IC705_DV_READY=off</code></td><td>关闭 DV DSP 的版本应答</td></tr>
+  <tr><td><code>RZA1H_DEBUG=fpga,rspi,…</code></td><td>打开各设备的调试输出（<code>all</code> = 全部）</td></tr>
+  <tr><td><code>RZA1H_PINS</code>、<code>RZA1H_ADC_VALS</code></td><td>引脚初始电平、ADC 通道初值</td></tr>
+  <tr><td><code>RZA1H_IC705_EEPROM</code></td><td>EEPROM 镜像文件（设置持久化）</td></tr>
+</table></div>
+
+<footer>
+  ic-705-emu · 文档位置 <code>docs/emulator.html</code> · 相关文档：<code>docs/ic705/BOARD.md</code>、<code>docs/ic705/IO_MAP.md</code>、<code>docs/rz-a1h-machine.md</code>
+</footer>
+</div>
+</body>
+</html>

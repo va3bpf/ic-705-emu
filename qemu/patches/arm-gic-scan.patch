@@ -1,0 +1,96 @@
+diff --git a/hw/intc/arm_gic.c b/hw/intc/arm_gic.c
+index 4d4b79e..bad2242 100644
+--- a/hw/intc/arm_gic.c
++++ b/hw/intc/arm_gic.c
+@@ -91,7 +91,12 @@ static inline void gic_get_best_irq(GICState *s, int cpu,
+     *best_irq = 1023;
+     *best_prio = 0x100;
+ 
+-    for (irq = 0; irq < s->num_irq; irq++) {
++    for (irq = find_first_bit(s->irq_cand, s->num_irq); irq < s->num_irq;
++         irq = find_next_bit(s->irq_cand, s->num_irq, irq + 1)) {
++        if (!s->irq_state[irq].pending && !s->irq_state[irq].level) {
++            clear_bit(irq, s->irq_cand);    /* cannot be pending: skip it */
++            continue;
++        }
+         if (GIC_DIST_TEST_ENABLED(irq, cm) && gic_test_pending(s, irq, cm) &&
+             (!GIC_DIST_TEST_ACTIVE(irq, cm)) &&
+             (irq < GIC_INTERNAL || GIC_DIST_TARGET(irq) & cm)) {
+@@ -1421,6 +1426,7 @@ static void gic_dist_writeb(void *opaque, hwaddr offset,
+                  * pending updates the set of CPUs it is pending on.
+                  */
+                 s->irq_state[irq].pending = value & ALL_CPU_MASK;
++                set_bit(irq, s->irq_cand);
+             }
+         }
+     } else if (offset < 0xf00) {
+diff --git a/hw/intc/arm_gic_common.c b/hw/intc/arm_gic_common.c
+index 304d89c..536cac6 100644
+--- a/hw/intc/arm_gic_common.c
++++ b/hw/intc/arm_gic_common.c
+@@ -45,6 +45,7 @@ static int gic_post_load(void *opaque, int version_id)
+     GICState *s = (GICState *)opaque;
+     ARMGICCommonClass *c = ARM_GIC_COMMON_GET_CLASS(s);
+ 
++    bitmap_fill(s->irq_cand, GIC_MAXIRQ);
+     if (c->post_load) {
+         c->post_load(s);
+     }
+@@ -283,6 +284,7 @@ static void arm_gic_common_reset_hold(Object *obj, ResetType type)
+     }
+ 
+     memset(s->irq_state, 0, GIC_MAXIRQ * sizeof(gic_irq_state));
++    bitmap_fill(s->irq_cand, GIC_MAXIRQ);
+     arm_gic_common_reset_irq_state(s, 0, resetprio);
+ 
+     if (s->virt_extn) {
+diff --git a/hw/intc/gic_internal.h b/hw/intc/gic_internal.h
+index b821f1f..8299242 100644
+--- a/hw/intc/gic_internal.h
++++ b/hw/intc/gic_internal.h
+@@ -29,7 +29,8 @@
+ #define GIC_DIST_SET_ENABLED(irq, cm) (s->irq_state[irq].enabled |= (cm))
+ #define GIC_DIST_CLEAR_ENABLED(irq, cm) (s->irq_state[irq].enabled &= ~(cm))
+ #define GIC_DIST_TEST_ENABLED(irq, cm) ((s->irq_state[irq].enabled & (cm)) != 0)
+-#define GIC_DIST_SET_PENDING(irq, cm) (s->irq_state[irq].pending |= (cm))
++#define GIC_DIST_SET_PENDING(irq, cm) \
++    (set_bit((irq), s->irq_cand), s->irq_state[irq].pending |= (cm))
+ #define GIC_DIST_CLEAR_PENDING(irq, cm) (s->irq_state[irq].pending &= ~(cm))
+ #define GIC_DIST_SET_ACTIVE(irq, cm) (s->irq_state[irq].active |= (cm))
+ #define GIC_DIST_CLEAR_ACTIVE(irq, cm) (s->irq_state[irq].active &= ~(cm))
+@@ -37,7 +38,8 @@
+ #define GIC_DIST_SET_MODEL(irq) (s->irq_state[irq].model = true)
+ #define GIC_DIST_CLEAR_MODEL(irq) (s->irq_state[irq].model = false)
+ #define GIC_DIST_TEST_MODEL(irq) (s->irq_state[irq].model)
+-#define GIC_DIST_SET_LEVEL(irq, cm) (s->irq_state[irq].level |= (cm))
++#define GIC_DIST_SET_LEVEL(irq, cm) \
++    (set_bit((irq), s->irq_cand), s->irq_state[irq].level |= (cm))
+ #define GIC_DIST_CLEAR_LEVEL(irq, cm) (s->irq_state[irq].level &= ~(cm))
+ #define GIC_DIST_TEST_LEVEL(irq, cm) ((s->irq_state[irq].level & (cm)) != 0)
+ #define GIC_DIST_SET_EDGE_TRIGGER(irq) (s->irq_state[irq].edge_trigger = true)
+diff --git a/include/hw/intc/arm_gic_common.h b/include/hw/intc/arm_gic_common.h
+index b169394..db3ff80 100644
+--- a/include/hw/intc/arm_gic_common.h
++++ b/include/hw/intc/arm_gic_common.h
+@@ -22,6 +22,7 @@
+ #define HW_ARM_GIC_COMMON_H
+ 
+ #include "hw/core/sysbus.h"
++#include "qemu/bitops.h"
+ #include "qom/object.h"
+ 
+ /* Maximum number of possible interrupts, determined by the GIC architecture */
+@@ -142,6 +143,13 @@ struct GICState {
+     MemoryRegion vcpuiomem; /* vCPU interface */
+ 
+     uint32_t num_irq;
++    /*
++     * IRQs that may be pending: a bit is set whenever an IRQ's pending or
++     * level state is set, and cleared lazily by gic_get_best_irq() once both
++     * are clear, so the priority scan skips the idle IRQs. Not migrated:
++     * reset and post_load set every bit.
++     */
++    unsigned long irq_cand[BITS_TO_LONGS(GIC_MAXIRQ)];
+     uint32_t revision;
+     bool security_extn;
+     bool virt_extn;

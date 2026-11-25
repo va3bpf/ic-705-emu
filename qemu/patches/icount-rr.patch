@@ -1,0 +1,320 @@
+diff --git a/accel/tcg/icount-common.c b/accel/tcg/icount-common.c
+index b1b6c00..5b82fd8 100644
+--- a/accel/tcg/icount-common.c
++++ b/accel/tcg/icount-common.c
+@@ -81,13 +81,69 @@ static int64_t icount_get_executed(CPUState *cpu)
+  * account executed instructions. This is done by the TCG vCPU
+  * thread so the main-loop can see time has moved forward.
+  */
++/*
++ * QEMU_ICOUNT_CPU_SCALE="s0,s1,...": units of the instruction counter one
++ * instruction of each vCPU costs, by cpu_index. Every unit is 2^shift ns, so
++ * with shift=1 a scale of 32 runs that CPU at 15.6 MIPS: a 16 MHz Cortex-M0
++ * beside a Cortex-A9 that runs at 500 MIPS. With one scale for all CPUs a
++ * slow microcontroller polling its GPIOs executes as many instructions as
++ * the main CPU and costs as much host time.
++ */
++#define ICOUNT_MAX_SCALES 16
++
++
++bool icount_rr_parallel(void)
++{
++    static int on = -1;
++
++    if (on < 0) {
++        const char *e = getenv("QEMU_ICOUNT_RR_PARALLEL");
++        on = e && *e && strcmp(e, "0") != 0;
++    }
++    return on;
++}
++
++int64_t icount_raw_peek(void)
++{
++    return qatomic_read(&timers_state.qemu_icount);
++}
++
++/* ICOUNT_PAR: only the vCPU thread moves the counter, with no vCPU running */
++void icount_raw_set(int64_t v)
++{
++    seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                       &timers_state.vm_clock_lock);
++    qatomic_set(&timers_state.qemu_icount, v);
++    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                         &timers_state.vm_clock_lock);
++}
++
++int icount_cpu_scale(CPUState *cpu)
++{
++    static int scale[ICOUNT_MAX_SCALES];
++    static bool parsed;
++
++    if (!parsed) {
++        const char *e = getenv("QEMU_ICOUNT_CPU_SCALE");
++        g_auto(GStrv) parts = g_strsplit(e ? e : "", ",", ICOUNT_MAX_SCALES);
++        int n = g_strv_length(parts);
++
++        for (int i = 0; i < ICOUNT_MAX_SCALES; i++) {
++            int x = i < n ? atoi(parts[i]) : 1;
++            scale[i] = x > 0 ? x : 1;
++        }
++        parsed = true;
++    }
++    return cpu->cpu_index < ICOUNT_MAX_SCALES ? scale[cpu->cpu_index] : 1;
++}
++
+ static void icount_update_locked(CPUState *cpu)
+ {
+     int64_t executed = icount_get_executed(cpu);
+     cpu->icount_budget -= executed;
+ 
+     qatomic_set(&timers_state.qemu_icount,
+-                timers_state.qemu_icount + executed);
++                timers_state.qemu_icount + executed * icount_cpu_scale(cpu));
+ }
+ 
+ /*
+diff --git a/accel/tcg/tcg-accel-ops-icount.c b/accel/tcg/tcg-accel-ops-icount.c
+index d0f7b41..505d0b7 100644
+--- a/accel/tcg/tcg-accel-ops-icount.c
++++ b/accel/tcg/tcg-accel-ops-icount.c
+@@ -89,6 +89,58 @@ void icount_handle_deadline(void)
+     }
+ }
+ 
++/*
++ * QEMU_ICOUNT_RR_WEIGHTS="w0,w1,...": share of each round-robin round given
++ * to each vCPU, by cpu_index. Every vCPU's insns advance the one virtual
++ * clock, so an even split runs a slow microcontroller as fast as the main
++ * CPU and lets it burn half of virtual and host time. Weights proportional
++ * to the real clock rates keep both near their real speeds. Unset or
++ * malformed: the even split.
++ */
++#define ICOUNT_MAX_WEIGHTS 16
++static int icount_weights[ICOUNT_MAX_WEIGHTS];
++static int icount_nweights = -1;
++
++static void icount_parse_weights(void)
++{
++    const char *e = getenv("QEMU_ICOUNT_RR_WEIGHTS");
++    g_auto(GStrv) parts = NULL;
++    int n = 0;
++
++    icount_nweights = 0;
++    if (!e || !*e) {
++        return;
++    }
++    parts = g_strsplit(e, ",", ICOUNT_MAX_WEIGHTS);
++    for (; parts[n]; n++) {
++        int w = atoi(parts[n]);
++        if (w <= 0) {
++            return;
++        }
++        icount_weights[n] = w;
++    }
++    icount_nweights = n;
++}
++
++int64_t icount_weighted_budget(CPUState *cpu, int64_t cpu_budget, int cpu_count)
++{
++    int64_t total = cpu_budget * cpu_count, sum = 0, b;
++    int w;
++
++    if (icount_nweights < 0) {
++        icount_parse_weights();
++    }
++    if (icount_nweights == 0 || cpu_count <= 1) {
++        return cpu_budget;
++    }
++    for (int i = 0; i < cpu_count; i++) {
++        sum += i < icount_nweights ? icount_weights[i] : 1;
++    }
++    w = cpu->cpu_index < icount_nweights ? icount_weights[cpu->cpu_index] : 1;
++    b = total * w / sum;
++    return b > 0 ? b : 1;
++}
++
+ /* Distribute the budget evenly across all CPUs */
+ int64_t icount_percpu_budget(int cpu_count)
+ {
+@@ -116,7 +168,13 @@ void icount_prepare_for_run(CPUState *cpu, int64_t cpu_budget)
+ 
+     replay_mutex_lock();
+ 
+-    cpu->icount_budget = MIN(icount_get_limit(), cpu_budget);
++    /* Budgets are in counter units; this CPU's instructions cost scale. */
++    {
++        int64_t units = MIN(icount_get_limit(), cpu_budget);
++        int scale = icount_cpu_scale(cpu);
++
++        cpu->icount_budget = (units + scale - 1) / scale;
++    }
+     insns_left = MIN(0xffff, cpu->icount_budget);
+     cpu->neg.icount_decr.u16.low = insns_left;
+     cpu->icount_extra = cpu->icount_budget - insns_left;
+diff --git a/accel/tcg/tcg-accel-ops-icount.h b/accel/tcg/tcg-accel-ops-icount.h
+index 16a301b..b9b0aa0 100644
+--- a/accel/tcg/tcg-accel-ops-icount.h
++++ b/accel/tcg/tcg-accel-ops-icount.h
+@@ -13,6 +13,7 @@
+ void icount_handle_deadline(void);
+ void icount_prepare_for_run(CPUState *cpu, int64_t cpu_budget);
+ int64_t icount_percpu_budget(int cpu_count);
++int64_t icount_weighted_budget(CPUState *cpu, int64_t cpu_budget, int cpu_count);
+ void icount_process_data(CPUState *cpu);
+ 
+ void icount_handle_interrupt(CPUState *cpu, int mask);
+diff --git a/accel/tcg/tcg-accel-ops-rr.c b/accel/tcg/tcg-accel-ops-rr.c
+index cdaa3e1..2bd6c38 100644
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -151,25 +151,27 @@ static void rr_force_rcu(Notifier *notify, void *data)
+  * The CPU count is cached based on the CPU list generation ID to avoid
+  * iterating the list every time.
+  */
+-static int rr_cpu_count(void)
++/*
++ * icount: CPUs that will use their share of this round. A halted CPU with no
++ * work returns at once, so dividing the time to the next timer deadline by
++ * every CPU let a lone busy CPU run only half of it per round, then a
++ * quarter, an eighth ... about log2(deadline) rounds per timer event, each
++ * paying the round-robin loop's locking and timer bookkeeping.
++ */
++static int rr_runnable_cpu_count(void)
+ {
+-    static unsigned int last_gen_id = ~0;
+-    static int cpu_count;
+     CPUState *cpu;
++    int n = 0;
+ 
+-    QEMU_LOCK_GUARD(&qemu_cpu_list_lock);
+-
+-    if (cpu_list_generation_id_get() != last_gen_id) {
+-        cpu_count = 0;
+-        CPU_FOREACH(cpu) {
+-            ++cpu_count;
++    CPU_FOREACH(cpu) {
++        if (cpu_can_run(cpu) && (!cpu->halted || cpu_has_work(cpu))) {
++            n++;
+         }
+-        last_gen_id = cpu_list_generation_id_get();
+     }
+-
+-    return cpu_count;
++    return n ? n : 1;
+ }
+ 
++
+ /*
+  * In the single-threaded case each vCPU is simulated in turn. If
+  * there is more than a single vCPU we create a simple timer to kick
+@@ -178,6 +180,28 @@ static int rr_cpu_count(void)
+  * elsewhere.
+  */
+ 
++/* ICOUNT_PAR: start and furthest end of the current parallel round */
++static int64_t par_t0, par_end;
++static bool par_active;
++
++/*
++ * QEMU_ICOUNT_RR_QUANTUM_NS: longest stretch of virtual time a vCPU may run
++ * ahead of the others in a parallel round. A request one CPU raises is seen
++ * by the other at most this late or this early.
++ */
++static int64_t par_quantum(void)
++{
++    static int64_t q = -1;
++
++    if (q < 0) {
++        const char *e = getenv("QEMU_ICOUNT_RR_QUANTUM_NS");
++        int64_t ns = e ? atoll(e) : 0;
++
++        q = ns > 0 ? MAX(1, icount_round(ns)) : INT64_MAX;
++    }
++    return q;
++}
++
+ static void *rr_cpu_thread_fn(void *arg)
+ {
+     Notifier force_rcu;
+@@ -241,7 +265,7 @@ static void *rr_cpu_thread_fn(void *arg)
+         bql_lock();
+ 
+         if (icount_enabled()) {
+-            int cpu_count = rr_cpu_count();
++            int cpu_count = rr_runnable_cpu_count();
+ 
+             /* Account partial waits to QEMU_CLOCK_VIRTUAL.  */
+             icount_account_warp_timer();
+@@ -252,6 +276,21 @@ static void *rr_cpu_thread_fn(void *arg)
+             icount_handle_deadline();
+ 
+             cpu_budget = icount_percpu_budget(cpu_count);
++            if (icount_rr_parallel()) {
++                /*
++                 * ICOUNT_PAR: a round starts when the list starts over; a
++                 * resumed partial round keeps its start so every vCPU still
++                 * covers the same stretch of time.
++                 */
++                if (!cpu || cpu == first_cpu || !par_active) {
++                    if (par_active) {
++                        icount_raw_set(MAX(par_end, icount_raw_peek()));
++                    }
++                    par_t0 = par_end = icount_raw_peek();
++                    par_active = true;
++                }
++                cpu_budget = par_quantum();
++            }
+         }
+ 
+         replay_mutex_unlock();
+@@ -281,11 +320,22 @@ static void *rr_cpu_thread_fn(void *arg)
+ 
+                 bql_unlock();
+                 if (icount_enabled()) {
+-                    icount_prepare_for_run(cpu, cpu_budget);
++                    if (icount_rr_parallel()) {
++                        icount_raw_set(par_t0);
++                        icount_prepare_for_run(cpu, cpu_budget);
++                    } else {
++                        icount_prepare_for_run(cpu,
++                            icount_weighted_budget(cpu, cpu_budget,
++                                                   rr_runnable_cpu_count()));
++                    }
+                 }
+                 r = tcg_cpu_exec(cpu);
+                 if (icount_enabled()) {
+                     icount_process_data(cpu);
++                    if (icount_rr_parallel()) {
++                        par_end = MAX(par_end, icount_raw_peek());
++                        icount_raw_set(par_end);
++                    }
+                 }
+                 bql_lock();
+ 
+diff --git a/include/exec/icount.h b/include/exec/icount.h
+index 7a26b40..188adc2 100644
+--- a/include/exec/icount.h
++++ b/include/exec/icount.h
+@@ -43,6 +43,22 @@ extern ICountMode use_icount;
+  */
+ void icount_update(CPUState *cpu);
+ 
++/*
++ * Units of the instruction counter that one instruction of @cpu costs
++ * (QEMU_ICOUNT_CPU_SCALE="s0,s1,..." by cpu_index, default 1).
++ */
++int icount_cpu_scale(CPUState *cpu);
++
++/*
++ * Parallel round-robin (QEMU_ICOUNT_RR_PARALLEL=1): every vCPU of a round
++ * runs over the same stretch of virtual time instead of a share of it.
++ * icount_round_rewind() restarts the counter at the round's start for the
++ * next vCPU; icount_round_finish() leaves it at the furthest vCPU.
++ */
++bool icount_rr_parallel(void);
++int64_t icount_raw_peek(void);
++void icount_raw_set(int64_t v); /* ICOUNT_PAR */
++
+ /* get raw icount value */
+ int64_t icount_get_raw(void);
+ 

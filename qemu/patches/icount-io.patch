@@ -1,0 +1,279 @@
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index 7f7c208..c46167e 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -47,6 +47,7 @@
+ #include "tb-hash.h"
+ #include "tlb-bounds.h"
+ #include "internal-common.h"
++#include "exec/icount.h"
+ #include "system-page-protection.h"
+ #ifdef CONFIG_PLUGIN
+ #include "qemu/plugin-memory.h"
+@@ -927,6 +928,14 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
+         unsigned int n = tlb_n_entries(fast);
+         unsigned int i;
+ 
++        /*
++         * Nothing was filled in this MMU mode since its last flush (the
++         * victim TLB is emptied by a flush too). Every new TB write-protects
++         * its page here, and most of the modes are never used.
++         */
++        if (!desc->n_used_entries) {
++            continue;
++        }
+         for (i = 0; i < n; i++) {
+             tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i],
+                                          start, length);
+@@ -1270,6 +1279,59 @@ static inline void cpu_unaligned_access(CPUState *cpu, vaddr addr,
+                                           mmu_idx, retaddr);
+ }
+ 
++/*
++ * icount: bus wait states for device accesses. Plain icount charges a device
++ * register access like any other insn, so a guest polling a slow peripheral
++ * bus runs far more iterations per virtual second than real hardware does.
++ * QEMU_ICOUNT_IO_WAIT=N charges N extra insns of virtual time per access.
++ * The charge is taken from the current budget only, so it never moves time
++ * past the next timer deadline, and it is deterministic.
++ */
++#define IO_WAIT_MAX_CPUS 16
++/*
++ * QEMU_ICOUNT_IO_WAIT=N applies to every CPU; "N0,N1,..." sets it by
++ * cpu_index (CPUs past the list get 0). The peripheral bus of a Cortex-A SoC
++ * and the single-cycle I/O port of a Cortex-M0+ microcontroller cost very
++ * different amounts of time.
++ */
++static int io_wait_insns(CPUState *cpu)
++{
++    static int insns[IO_WAIT_MAX_CPUS];
++    static bool parsed;
++
++    if (!parsed) {
++        const char *e = getenv("QEMU_ICOUNT_IO_WAIT");
++        g_auto(GStrv) parts = g_strsplit(e ? e : "", ",", IO_WAIT_MAX_CPUS);
++        int n = g_strv_length(parts);
++
++        for (int i = 0; i < IO_WAIT_MAX_CPUS; i++) {
++            const char *v = n == 1 ? parts[0] : i < n ? parts[i] : NULL;
++            int x = v ? atoi(v) : 0;
++            insns[i] = x > 0 ? MIN(x, 0xffff) : 0;
++        }
++        parsed = true;
++    }
++    return cpu->cpu_index < IO_WAIT_MAX_CPUS ? insns[cpu->cpu_index] : 0;
++}
++
++static void io_charge_wait(CPUState *cpu)
++{
++    int64_t k = io_wait_insns(cpu);
++    int64_t low;
++
++    if (!k || !icount_enabled() || !(curr_cflags(cpu) & CF_USE_ICOUNT)) {
++        return;
++    }
++    if (cpu->icount_extra >= k) {
++        cpu->icount_extra -= k;
++        return;
++    }
++    k -= cpu->icount_extra;
++    cpu->icount_extra = 0;
++    low = cpu->neg.icount_decr.u16.low;
++    cpu->neg.icount_decr.u16.low = low > k ? low - k : 0;
++}
++
+ static MemoryRegionSection *
+ io_prepare(hwaddr *out_offset, CPUState *cpu, CPUTLBEntryFull *full,
+            vaddr addr, uintptr_t retaddr)
+@@ -1283,6 +1345,7 @@ io_prepare(hwaddr *out_offset, CPUState *cpu, CPUTLBEntryFull *full,
+     if (!cpu->neg.can_do_io) {
+         cpu_io_recompile(cpu, retaddr);
+     }
++    io_charge_wait(cpu);
+ 
+     *out_offset = mr_offset;
+     return section;
+@@ -1968,6 +2031,21 @@ static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
+     return ret_be;
+ }
+ 
++/*
++ * Take the BQL for a device access unless the region opted out with
++ * memory_region_enable_lockless_io(). Under MTTCG a vCPU polling a device
++ * register in a tight loop otherwise holds the BQL most of the time and the
++ * other vCPUs wait for it on every device access of their own.
++ */
++static bool mmio_bql_lock(MemoryRegion *mr)
++{
++    if (mr->lockless_io || bql_locked()) {
++        return false;
++    }
++    bql_lock();
++    return true;
++}
++
+ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
+                                uint64_t ret_be, vaddr addr, int size,
+                                int mmu_idx, MMUAccessType type, uintptr_t ra)
+@@ -1981,9 +2059,13 @@ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
+     section = io_prepare(&mr_offset, cpu, full, addr, ra);
+     mr = section->mr;
+ 
+-    BQL_LOCK_GUARD();
+-    return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
+-                           type, ra, mr, mr_offset);
++    bool locked = mmio_bql_lock(mr);
++    uint64_t ret = int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
++                                   type, ra, mr, mr_offset);
++    if (locked) {
++        bql_unlock();
++    }
++    return ret;
+ }
+ 
+ static Int128 do_ld16_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
+@@ -2495,9 +2577,13 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
+     section = io_prepare(&mr_offset, cpu, full, addr, ra);
+     mr = section->mr;
+ 
+-    BQL_LOCK_GUARD();
+-    return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
+-                           ra, mr, mr_offset);
++    bool locked = mmio_bql_lock(mr);
++    uint64_t ret = int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
++                                   ra, mr, mr_offset);
++    if (locked) {
++        bql_unlock();
++    }
++    return ret;
+ }
+ 
+ static uint64_t do_st16_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
+diff --git a/accel/tcg/internal-common.h b/accel/tcg/internal-common.h
+index 9e7be2d..89468aa 100644
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -135,6 +135,12 @@ void page_table_config_init(void);
+ 
+ #ifndef CONFIG_USER_ONLY
+ G_NORETURN void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr);
++/*
++ * icount: guest instructions that have needed cpu_io_recompile(). The
++ * translator ends a TB before and after each of them, so the device access
++ * is the last insn of its TB and never needs to be rewound again.
++ */
++bool tcg_io_insn_known(CPUState *cpu, vaddr pc);
+ #endif /* CONFIG_USER_ONLY */
+ 
+ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index 328d96a..c61459c 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -566,6 +566,58 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr)
+ }
+ 
+ #ifndef CONFIG_USER_ONLY
++/*
++ * Set of (cpu, guest pc) pairs of instructions that did device I/O in the
++ * middle of a TB under icount. A guest polling a device register in a tight
++ * loop otherwise pays a longjmp, a TB lookup by host pc, a state restore and
++ * a TB exit on every single access.
++ */
++static GHashTable *io_insns;
++static QemuMutex io_insns_lock;
++static gsize io_insns_init;
++
++static uint64_t io_insn_key(CPUState *cpu, vaddr pc)
++{
++    return ((uint64_t)cpu->cpu_index << 56) ^ (uint64_t)pc;
++}
++
++static void io_insns_setup(void)
++{
++    if (g_once_init_enter(&io_insns_init)) {
++        qemu_mutex_init(&io_insns_lock);
++        io_insns = g_hash_table_new_full(g_int64_hash, g_int64_equal,
++                                         g_free, NULL);
++        g_once_init_leave(&io_insns_init, 1);
++    }
++}
++
++bool tcg_io_insn_known(CPUState *cpu, vaddr pc)
++{
++    uint64_t key = io_insn_key(cpu, pc);
++    bool found;
++
++    if (!qatomic_read(&io_insns_init)) {
++        return false;
++    }
++    qemu_mutex_lock(&io_insns_lock);
++    found = g_hash_table_contains(io_insns, &key);
++    qemu_mutex_unlock(&io_insns_lock);
++    return found;
++}
++
++static bool io_insn_remember(CPUState *cpu, vaddr pc)
++{
++    uint64_t *key = g_new(uint64_t, 1);
++    bool added;
++
++    io_insns_setup();
++    *key = io_insn_key(cpu, pc);
++    qemu_mutex_lock(&io_insns_lock);
++    added = g_hash_table_add(io_insns, key);
++    qemu_mutex_unlock(&io_insns_lock);
++    return added;
++}
++
+ /*
+  * In deterministic execution mode, instructions doing device I/Os
+  * must be at the end of the TB.
+@@ -606,6 +658,16 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
+      */
+     cpu->cflags_next_tb = curr_cflags(cpu) | CF_MEMI_ONLY | CF_NOIRQ | n;
+ 
++    /*
++     * Remember the I/O insn and drop this TB, so that it is retranslated
++     * split around the insn (see translator_loop). The delay-slot case
++     * (n == 2) keeps the old behaviour.
++     */
++    if (n == 1 && !(tb_cflags(tb) & CF_MEMI_ONLY) &&
++        io_insn_remember(cpu, cpu->cc->get_pc(cpu))) {
++        tb_phys_invalidate(tb, -1);
++    }
++
+     if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
+         vaddr pc = cpu->cc->get_pc(cpu);
+         if (qemu_log_in_addr_range(pc)) {
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index 57daded..66457cd 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -157,6 +157,8 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+     db->plugin_enabled = plugin_enabled;
+ 
+     while (true) {
++        vaddr this_pc = db->pc_next;
++
+         *max_insns = ++db->num_insns;
+         ops->insn_start(db, cpu);
+         db->insn_start = tcg_last_op();
+@@ -195,6 +197,17 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+             break;
+         }
+ 
++        /*
++         * icount: keep each insn known to do device I/O alone at the end of
++         * a TB, so that it can access the device without cpu_io_recompile().
++         */
++        if ((cflags & CF_USE_ICOUNT) &&
++            (tcg_io_insn_known(cpu, this_pc) ||
++             tcg_io_insn_known(cpu, db->pc_next))) {
++            db->is_jmp = DISAS_TOO_MANY;
++            break;
++        }
++
+         /* Stop translation if the output buffer is full,
+            or we have executed all of the allowed instructions.  */
+         if (tcg_op_buf_full() || db->num_insns >= db->max_insns) {

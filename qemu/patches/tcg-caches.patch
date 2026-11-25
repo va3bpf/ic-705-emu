@@ -1,0 +1,46 @@
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+index c3a505e..9aacc66 100644
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -12,7 +12,7 @@
+ #include "qemu/rcu.h"
+ #include "exec/cpu-common.h"
+ 
+-#define TB_JMP_CACHE_BITS 12
++#define TB_JMP_CACHE_BITS 14
+ #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
+ 
+ /*
+diff --git a/accel/tcg/tlb-bounds.h b/accel/tcg/tlb-bounds.h
+index f83d9ac..fe01791 100644
+--- a/accel/tcg/tlb-bounds.h
++++ b/accel/tcg/tlb-bounds.h
+@@ -8,6 +8,6 @@
+ 
+ #define CPU_TLB_DYN_MIN_BITS 6
+ #define CPU_TLB_DYN_MAX_BITS (32 - TARGET_PAGE_BITS)
+-#define CPU_TLB_DYN_DEFAULT_BITS 8
++#define CPU_TLB_DYN_DEFAULT_BITS 12
+ 
+ #endif /* ACCEL_TCG_TLB_BOUNDS_H */
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+index af45234..883a900 100644
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -392,11 +392,14 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
+ {
+     ARMCPU *cpu = env_archcpu(env);
+ 
+-    if (raw_read(env, ri) != value && !arm_feature(env, ARM_FEATURE_PMSA)
++    if (((raw_read(env, ri) ^ value) & 0xff) && !arm_feature(env, ARM_FEATURE_PMSA)
+         && !extended_addresses_enabled(env)) {
+         /*
+          * For VMSA (when not using the LPAE long descriptor page table
+-         * format) this register includes the ASID, so do a TLB flush.
++         * format) bits [7:0] of this register are the ASID, so do a TLB
++         * flush when they change. Bits [31:8] are PROCID, which does not
++         * affect translation: an RTOS that writes its task number there on
++         * every context switch must not flush the TLB each time.
+          * For PMSA it is purely a process ID and no action is needed.
+          */
+         tlb_flush(CPU(cpu));

@@ -1,0 +1,35 @@
+Build glue for the RZ/A1H machine: a Kconfig symbol, the SoC models linked
+from qemu/machine/ into hw/arm/, and the IC-705 peripherals in hw/arm/ic705/
+(qemu/ic705/, with its own meson.build).
+
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -727,3 +727,11 @@ config ARMSSE
+     select UNIMP
+     select SSE_COUNTER
+     select SSE_TIMER
++
++config RZA1H
++    bool
++    default y
++    depends on TCG && ARM
++    select ARM_GIC
++    select UNIMP
++    select SD
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -111,5 +111,12 @@ arm_common_ss.add(when: 'CONFIG_VERSATILE', if_true: files('versatilepb.c'))
+ arm_common_ss.add(when: 'CONFIG_VEXPRESS', if_true: files('vexpress.c'))
+ 
+ arm_common_ss.add(files('boot.c'))
++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files(
++  'rz_a1h.c', 'adc.c', 'dmac.c', 'fake_dsp.c', 'fake_fpga.c', 'gpio.c',
++  'l2c.c', 'mmc.c', 'mtu2.c', 'openvg.c', 'ostm.c', 'riic.c',
++  'rspi2.c', 'rx8803.c', 'scif.c', 'sdhi.c', 'spibsc.c', 'ssif.c',
++  'stbc.c', 'vdc5.c', 'wdt.c',
++))
++subdir('ic705')
+ 
+ hw_common_arch += {'arm': arm_common_ss}
