@@ -25,6 +25,22 @@ python ic705_remote.py --host user@raspberrypi.local --load examples/lvgl/lvgl_d
 In the window, `p` is POWER, the wheel is the main dial and the mouse is the
 touch screen.
 
+## Debug log
+
+`log_printf()` (printf-style, from any task) writes to SCIF0 at 115200 8N1.
+The demo logs power on/off, band, step and mode changes:
+
+```
+IC-705 LVGL demo: powered on by the POWER key
+FreeRTOS V11.1.0, LVGL 9.2.2
+GUI up, free heap 452976 bytes
+band 7 m: 7074000 Hz
+```
+
+With `--vnc N`, ic705.py puts SCIF0 and SCIF1 on TCP port 4500+N
+(`nc 127.0.0.1 4511` for display 11); ic705_remote.py shows them in the
+loader's "Serial log" pane, locally or through its ssh tunnel.
+
 ## How it fits together
 
 | File | What it does |
@@ -35,6 +51,7 @@ touch screen.
 | `touch.c` | the TSC2046 touch controller, bit-banged on port 3, as an LVGL pointer |
 | `dial_power.c` | the main dial (MTU2 channel 1, phase counting) and power: PWRS, PWRDS, deep standby with PWRK as the wake-up |
 | `ui.c` | the screen |
+| `serial.c` | `log_printf()`: the debug log on SCIF0, polled, a mutex between tasks |
 | `support.c` | `memcpy` and the few other C library functions needed; byte-wise, because with the MMU off unaligned accesses fault |
 | `FreeRTOSConfig.h`, `lv_conf.h` | configuration |
 

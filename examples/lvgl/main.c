@@ -92,8 +92,10 @@ static void gui_task(void *arg)
     touch_init();
     dial_init();
     ui_create();
+    log_printf("GUI up, free heap %u bytes\n", (unsigned)xPortGetFreeHeapSize());
     for (;;) {
         if (ulTaskNotifyTake(pdTRUE, 0)) {  /* the power task asks to switch off */
+            log_printf("POWER held: switching off\n");
             ui_show_power_off();
             for (int i = 0; i < 40; i++) {  /* draw it and keep it up ~1 s */
                 lv_timer_handler();
@@ -134,6 +136,10 @@ int main(void)
         power_off_now();                    /* cold start: back to deep standby */
     }
     power_on();
+    serial_init();
+    log_printf("\nIC-705 LVGL demo: powered on by the POWER key\n");
+    log_printf("FreeRTOS %s, LVGL %d.%d.%d\n", tskKERNEL_VERSION_NUMBER,
+               LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
     gic_init();
     xTaskCreate(gui_task, "gui", 16384, NULL, 2, &gui_task_handle);
     xTaskCreate(power_task, "power", 512, NULL, 3, NULL);

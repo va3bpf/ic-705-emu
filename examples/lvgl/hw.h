@@ -66,4 +66,9 @@ void ui_create(void);
 void ui_poll(void);
 void ui_show_power_off(void);
 
+/* serial.c: debug log on SCIF0, 115200 8N1 */
+void serial_init(void);
+void serial_write(const char *s);
+void log_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
 #endif

@@ -66,6 +66,16 @@ def qmp(stream, command, **arguments):
     raise RuntimeError("QEMU closed the monitor connection")
 
 
+def serial_args(vnc, screenshot):
+    """With a VNC display: SCIF0 and SCIF1 (the free UARTs; SCIF2 is the GNSS,
+    SCIF3 the sub-CPU link) on TCP port 4500+N, for ic705_remote.py's serial log."""
+    if vnc is None or screenshot:
+        return ["-serial", "none"]
+    return ["-chardev", f"socket,id=log,host=127.0.0.1,port={4500 + vnc},server=on,"
+                        "wait=off,mux=on",
+            "-serial", "chardev:log", "-serial", "chardev:log"]
+
+
 def run(qemu, images, screenshot, seconds, shift, io_wait, quantum_us, vnc=None):
     # Main CPU and sub-CPU run side by side over the same virtual time, each at
     # its own speed: the Cortex-A9 at 2^shift ns per instruction, the 16 MHz
@@ -97,7 +107,7 @@ def run(qemu, images, screenshot, seconds, shift, io_wait, quantum_us, vnc=None)
             "none" if screenshot
             else f"vnc=127.0.0.1:{vnc}" if vnc is not None
             else "gtk,zoom-to-fit=on",
-            "-serial", "none", "-monitor", "none", "-icount", f"shift={shift}",
+            *serial_args(vnc, screenshot), "-monitor", "none", "-icount", f"shift={shift}",
             "-qmp", f"unix:{monitor},server=on,wait=off",
         ]
         if vnc is not None and not screenshot:
@@ -192,7 +202,7 @@ def run_image(qemu, image, screenshot, seconds, vnc=None, sub_images=None,
             "none" if screenshot
             else f"vnc=127.0.0.1:{vnc}" if vnc is not None
             else "gtk,zoom-to-fit=on",
-            "-serial", "none", "-monitor", "none", *icount,
+            *serial_args(vnc, screenshot), "-monitor", "none", *icount,
             "-qmp", f"unix:{monitor},server=on,wait=off",
         ]
         if vnc is not None and not screenshot:

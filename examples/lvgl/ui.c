@@ -34,6 +34,7 @@ static void on_band(lv_event_t *e)
     if (i < sizeof(band_hz) / sizeof(band_hz[0])) {
         freq_hz = band_hz[i];
         show_freq();
+        log_printf("band %s m: %lu Hz\n", band_map[i], (unsigned long)freq_hz);
     }
 }
 
@@ -43,6 +44,7 @@ static void on_step(lv_event_t *e)
 
     if (i < 3) {
         step_hz = step_values[i];
+        log_printf("step %lu Hz\n", (unsigned long)step_hz);
     }
 }
 
@@ -50,6 +52,7 @@ static void on_mode(lv_event_t *e)
 {
     mode = (mode + 1) % 5;
     lv_label_set_text(mode_label, modes[mode]);
+    log_printf("mode %s\n", modes[mode]);
 }
 
 static lv_obj_t *button_row(lv_obj_t *parent, const char *const *map, int y, int h,

@@ -117,8 +117,8 @@ python ic705_remote.py --host user@raspberrypi.local
 ```
 
 The script logs in with ssh, starts `ic705.py --vnc 11` on the Pi and
-forwards the LCD (VNC) and control (QMP) ports through the same ssh
-connection. Both listen only on the Pi's 127.0.0.1. `--dir` and `--firmware`
+forwards the LCD (VNC), control (QMP) and serial-log ports through the same ssh
+connection. All three listen only on the Pi's 127.0.0.1. `--dir` and `--firmware`
 set the paths on the Pi. The window opens at 1:1. Ctrl+wheel or Ctrl +/- zoom
 from 0.5× to 4×, Ctrl+0 returns to 1:1, and dragging the window edge picks
 the largest zoom that fits.
@@ -126,16 +126,21 @@ the largest zoom that fits.
 The same window also runs the emulator on this computer: `--host local`
 starts it in WSL on Windows (or directly on Linux), with no ssh.
 
-**Menus.** `python ic705_remote.py` without arguments opens the window with
-nothing running. File > Host... chooses where the emulator runs (`local` or
-`user@host`), File > Open firmware... (Ctrl+O) loads a local `.bin` or `.dat`
-and starts it (uploaded first for a remote host), File > Reload (F5) runs
-it again after a rebuild, File > Recent lists the last ones, and File > Run
-Icom firmware goes back to `--firmware` on the host. Run > Sub-CPU beside a
-.bin adds Icom's sub-CPU to your own main-CPU firmware; Run > Save LCD
-screenshot... (Ctrl+S) saves the screen. The window stays open while the
-emulator behind it is replaced. The host, the recent files and the sub-CPU
-choice are kept in `~/.ic705_remote.json`.
+**Loader.** `python ic705_remote.py` without arguments opens two windows:
+the loader and, once something runs, the front panel it owns. In the loader
+choose the firmware (a local `.bin` or `.dat`, uploaded first for a remote
+host, or a path on the host), Local (WSL on Windows, or directly on Linux)
+or Remote (host, user, and a password or empty for your ssh key), and
+whether Icom's sub-CPU runs beside your `.bin`. Start/Stop, Restart (F5,
+after a rebuild) and Screenshot are there too. Every change is saved at
+once in `~/.ic705_remote.json` (the password encrypted with Windows DPAPI)
+and used at the next start; a saved firmware starts by itself.
+
+Closing the panel window only hides it, and "Show panel" brings it back;
+Stop ends the emulator; closing the loader ends everything. The fold-out
+"Serial log" shows what the firmware writes to SCIF0/SCIF1 (TCP port 4500+N
+on the emulator host, forwarded through the same ssh connection); see
+[examples/lvgl](examples/lvgl/README.md#debug-log).
 
 ### Front panel
 
