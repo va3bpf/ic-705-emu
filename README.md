@@ -123,6 +123,20 @@ set the paths on the Pi. The window opens at 1:1. Ctrl+wheel or Ctrl +/- zoom
 from 0.5× to 4×, Ctrl+0 returns to 1:1, and dragging the window edge picks
 the largest zoom that fits.
 
+The same window also runs the emulator on this computer: `--host local`
+starts it in WSL on Windows (or directly on Linux), with no ssh.
+
+**Menus.** `python ic705_remote.py` without arguments opens the window with
+nothing running. File > Host... chooses where the emulator runs (`local` or
+`user@host`), File > Open firmware... (Ctrl+O) loads a local `.bin` or `.dat`
+and starts it (uploaded first for a remote host), File > Reload (F5) runs
+it again after a rebuild, File > Recent lists the last ones, and File > Run
+Icom firmware goes back to `--firmware` on the host. Run > Sub-CPU beside a
+.bin adds Icom's sub-CPU to your own main-CPU firmware; Run > Save LCD
+screenshot... (Ctrl+S) saves the screen. The window stays open while the
+emulator behind it is replaced. The host, the recent files and the sub-CPU
+choice are kept in `~/.ic705_remote.json`.
+
 ### Front panel
 
 The panel follows the radio's layout. Every control drives the input the
@@ -218,7 +232,9 @@ This project stands on the work of others:
 
 ## Licence
 
-See [NOTICE.md](NOTICE.md) for the origin and licence of each part. A QEMU
-binary built from this tree is covered by QEMU's licence (GPL-2.0-or-later).
+This project's own code and documents are under the MIT licence
+([LICENSE](LICENSE)). The parts from other projects keep their licences: see
+[NOTICE.md](NOTICE.md). A QEMU binary built from this tree is covered by
+QEMU's licence (GPL-2.0-or-later).
 "Icom" and "IC-705" are trademarks of Icom Inc. This project is not affiliated
 with Icom.

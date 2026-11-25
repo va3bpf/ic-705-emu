@@ -247,9 +247,11 @@ def main():
                              "(port 5900+N) and a QMP control port on 4400+N, for "
                              "ic705_remote.py over an SSH tunnel")
     args = parser.parse_args()
-    # SIGTERM (e.g. from a parent process) exits through the normal path, so
-    # QEMU is stopped instead of being left running
+    # SIGTERM and SIGHUP exit through the normal path, so QEMU is stopped
+    # instead of being left running
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    if hasattr(signal, "SIGHUP"):           # the ssh session of ic705_remote.py ended
+        signal.signal(signal.SIGHUP, lambda signum, frame: sys.exit(128 + signum))
     if args.seconds is not None and args.seconds <= 0:
         parser.error("--seconds must be positive")
     try:

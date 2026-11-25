@@ -23,6 +23,15 @@ at 0x18000000 on the IC-705 board, e.g. examples/power/power.bin). With
 
     python ic705_remote.py --host user@raspberrypi.local --load firmware/705E140.dat
     python ic705_remote.py --host user@raspberrypi.local --load examples/hello/hello.bin
+
+Without arguments the window opens with nothing running: File > Host... sets
+the emulator host (remembered): 'local' runs the emulator on this computer (in
+WSL on Windows), user@host on another machine over ssh. File > Open
+firmware... starts one.
+The window's File menu opens another firmware (Ctrl+O), reloads the current one
+after a rebuild (F5) or goes back to the Icom firmware; the Run menu saves LCD
+screenshots and chooses whether a .bin gets the sub-CPU. Recent files and that
+choice are kept in ~/.ic705_remote.json.
 """
 
 import argparse
@@ -372,9 +381,10 @@ def controls(radio):
     return keys, knobs, leds
 
 
-def window(rfb, radio, scale, title):
+def window(session, scale):
     import math
     import tkinter as tk
+    from tkinter import filedialog
 
     if sys.platform == "win32":
         # 1:1 means one LCD pixel per screen pixel: without this Windows display
@@ -385,8 +395,8 @@ def window(rfb, radio, scale, title):
         except (AttributeError, OSError):
             pass
     root = tk.Tk()
-    root.title(title)
     root.configure(bg="#1b1b1b")
+    radio = LiveRadio(session)
     keys, knobs, leds = controls(radio)
     state = {"step": step_for(scale), "ox": 0, "oy": 0, "frame": None, "fit": False,
              "active": None, "angle": {k[0]: 0.0 for k in knobs}, "leds": None,
@@ -503,6 +513,7 @@ def window(rfb, radio, scale, title):
                            tags=("status",))
         canvas.create_image(*P(LCD_X, LCD_Y), anchor="nw", tags=("lcd",))
         state["leds"] = None                                  # repaint LEDs
+        state["status"] = None                                # and the status line
         show()
 
     def turn_mark(name):
@@ -551,17 +562,106 @@ def window(rfb, radio, scale, title):
             canvas.itemconfigure("led:" + name, fill=fill)
 
     def redraw():
-        if rfb.closed:
-            root.destroy()
+        rfb = session.rfb
+        if rfb is not None and rfb.closed and not session.lock.locked():
+            session.status = f"{session.name} stopped - F5 starts it again"
+        if rfb is None or rfb.closed:                          # starting or stopped
+            show_status(session.status, "#d0a040")
+            root.after(100, redraw)
             return
         if rfb.dirty:
-            state["frame"] = rfb.frame()
+            state["frame"] = session.rfb.frame()
             show()
         state["tick"] = state.get("tick", 0) + 1
         if state["tick"] % 16 == 0:                             # LEDs: ~4 reads a second
             radio.poll_leds()
         paint_leds()
+        show_status(session.status)
         root.after(15, redraw)
+
+    def show_status(text, colour="#8a8a8a"):
+        if state["status"] != (text, colour):
+            state["status"] = (text, colour)
+            canvas.itemconfigure("status", text=text, fill=colour)
+            root.title(f"IC-705 on {session.host or '(no host)'} - {session.name if session.rfb else 'not running'}")
+
+    # ---------------------------------------------------------------- menus
+    def choose_host(event=None):
+        from tkinter import simpledialog
+        host = simpledialog.askstring(
+            "Emulator host", "local = this computer (WSL on Windows)\n"
+            "user@host = a remote machine over ssh, e.g. user@raspberrypi.local",
+            initialvalue=session.host or "local", parent=root)
+        if host and host.strip():
+            session.set_host(host.strip())
+            state["status"] = None                              # refresh the title
+        return bool(session.host)
+
+    def run(source):
+        if not session.host and not choose_host():
+            return
+        state["frame"] = None
+        canvas.itemconfigure("lcd", image="")
+        session.restart(source)
+        rebuild_recent()
+
+    def open_firmware(event=None):
+        path = filedialog.askopenfilename(
+            title="Open firmware", filetypes=[("Firmware", "*.bin *.dat"),
+                                              ("Flash image", "*.bin"),
+                                              ("Icom package", "*.dat"), ("All files", "*")])
+        if path:
+            run(Path(path))
+
+    def reload(event=None):
+        if session.source or session.rfb or session.ran:
+            run(session.source)
+
+    def save_screenshot(event=None):
+        if state["frame"] is None:
+            return
+        path = filedialog.asksaveasfilename(title="Save LCD screenshot",
+                                            defaultextension=".png",
+                                            filetypes=[("PNG", "*.png")])
+        if path:
+            write_png(path, *state["frame"])
+
+    subcpu = tk.BooleanVar(value=session.settings.get("subcpu", False))
+
+    def subcpu_changed():
+        session.settings["subcpu"] = subcpu.get()
+        session.save_settings()
+
+    menubar = tk.Menu(root)
+    file_menu = tk.Menu(menubar, tearoff=False)
+    recent_menu = tk.Menu(file_menu, tearoff=False)
+
+    def rebuild_recent():
+        recent_menu.delete(0, "end")
+        for item in session.settings.get("recent", []):
+            recent_menu.add_command(label=item, command=lambda p=item: run(Path(p)))
+        if not session.settings.get("recent"):
+            recent_menu.add_command(label="(none)", state="disabled")
+
+    file_menu.add_command(label="Open firmware...", accelerator="Ctrl+O", command=open_firmware)
+    file_menu.add_command(label="Reload", accelerator="F5", command=reload)
+    file_menu.add_cascade(label="Recent", menu=recent_menu)
+    file_menu.add_command(label="Run Icom firmware (" + session.icom_firmware + ")",
+                          command=lambda: run(None))
+    file_menu.add_separator()
+    file_menu.add_command(label="Host... (local or user@host)", command=choose_host)
+    file_menu.add_separator()
+    file_menu.add_command(label="Quit", command=root.destroy)
+    run_menu = tk.Menu(menubar, tearoff=False)
+    run_menu.add_checkbutton(label="Sub-CPU beside a .bin (panel keys, TX/RX LEDs)",
+                             variable=subcpu, command=subcpu_changed)
+    run_menu.add_command(label="Save LCD screenshot...", accelerator="Ctrl+S",
+                         command=save_screenshot)
+    menubar.add_cascade(label="File", menu=file_menu)
+    menubar.add_cascade(label="Run", menu=run_menu)
+    root.configure(menu=menubar)
+    rebuild_recent()
+    root.bind("<F5>", reload)
 
     def set_step(i):
         state["step"] = min(max(i, 0), len(STEPS) - 1)
@@ -591,6 +691,10 @@ def window(rfb, radio, scale, title):
                 return ("knob", knob, math.degrees(math.atan2(x - cx, cy - y)))
         return None
 
+    def pointer(x, y, mask):
+        if session.rfb and not session.rfb.closed:
+            session.rfb.pointer(x, y, mask)
+
     def lcd_xy(event):
         x, y = to_panel(event.x, event.y)
         return int(x - LCD_X), int(y - LCD_Y)
@@ -600,9 +704,9 @@ def window(rfb, radio, scale, title):
         state["active"] = h
         if not h:
             return
-        if h[0] == "lcd":
+        if h[0] == "lcd" and session.rfb:
             buttons["mask"] |= 1
-            rfb.pointer(h[1], h[2], buttons["mask"])
+            pointer(h[1], h[2], buttons["mask"])
         elif h[0] == "key":
             if h[2] is None:
                 canvas.itemconfigure("status", text=f"{h[1]}: its key input is not "
@@ -620,7 +724,7 @@ def window(rfb, radio, scale, title):
         if not h:
             return
         if h[0] == "lcd":
-            rfb.pointer(*lcd_xy(event), buttons["mask"])
+            pointer(*lcd_xy(event), buttons["mask"])
         elif h[0] == "knob":
             name, (cx, cy), r, per, turn, push = h[1]
             x, y = to_panel(event.x, event.y)
@@ -645,7 +749,7 @@ def window(rfb, radio, scale, title):
             return
         if h[0] == "lcd":
             buttons["mask"] &= ~1
-            rfb.pointer(*lcd_xy(event), buttons["mask"])
+            pointer(*lcd_xy(event), buttons["mask"])
         elif h[0] == "key":
             h[2](False)
             canvas.itemconfigure("keybg:" + h[1], fill="#3a3c40")
@@ -667,20 +771,26 @@ def window(rfb, radio, scale, title):
             turn(n)
         elif h and h[0] == "lcd":                               # wheel on the LCD: main dial
             bit = 8 if d > 0 else 16
-            rfb.pointer(h[1], h[2], buttons["mask"] | bit)
-            rfb.pointer(h[1], h[2], buttons["mask"])
+            pointer(h[1], h[2], buttons["mask"] | bit)
+            pointer(h[1], h[2], buttons["mask"])
 
     def key(event, down):
         if event.state & 0x4:                                   # Ctrl+key: window, not radio
-            if down and event.keysym in ("plus", "equal", "KP_Add"):
+            if down and event.keysym.lower() == "o":
+                open_firmware()
+            elif down and event.keysym.lower() == "s":
+                save_screenshot()
+            elif down and event.keysym in ("plus", "equal", "KP_Add"):
                 set_step(state["step"] + 1)
             elif down and event.keysym in ("minus", "KP_Subtract"):
                 set_step(state["step"] - 1)
             elif down and event.keysym in ("0", "KP_0"):
                 set_step(STEPS.index((1, 1)))
             return
-        if event.keysym_num and not event.keysym.startswith("Control"):
-            rfb.key(event.keysym_num, down)
+        if event.keysym == "F5":
+            return
+        if event.keysym_num and not event.keysym.startswith("Control") and session.rfb:
+            session.rfb.key(event.keysym_num, down)
 
     canvas.bind("<ButtonPress-1>", press)
     canvas.bind("<ButtonRelease-1>", release)
@@ -692,6 +802,155 @@ def window(rfb, radio, scale, title):
     canvas.focus_set()
     redraw()
     root.mainloop()
+
+
+class LiveRadio:
+    """The current session's Radio, looked up at each use (the window outlives sessions)."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def __getattr__(self, name):
+        radio = self._session.radio
+        if radio is None:
+            if name == "leds":
+                return {name: False for name in LEDS}
+            return lambda *args, **kwargs: None
+        return getattr(radio, name)
+
+
+SETTINGS = Path.home() / ".ic705_remote.json"
+
+
+class Session:
+    """One run of the emulator on the host: optional upload, ssh with the LCD (VNC)
+    and control (QMP) ports forwarded, and the connections to them. restart()
+    replaces it with a run of another firmware in the background."""
+
+    def __init__(self, args):
+        import json
+        self.args = args
+        self.icom_firmware = args.firmware
+        self.source = args.load                 # local Path, or None = --firmware on the host
+        self.ssh = self.rfb = self.radio = None
+        self.ran = False
+        self.status = ""
+        self.lock = threading.Lock()
+        try:
+            self.settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.settings = {}
+        if args.subcpu:
+            self.settings["subcpu"] = True
+        self.host = args.host or self.settings.get("host")
+        if args.host:
+            self.settings["host"] = args.host
+        self.status = ("File > Open firmware... starts the emulator" if self.host else
+                       "File > Host... chooses the emulator host, then File > Open firmware...")
+
+    def set_host(self, host):
+        self.host = host
+        self.settings["host"] = host
+        self.save_settings()
+
+    @property
+    def name(self):
+        return self.source.name if self.source else self.icom_firmware
+
+    def save_settings(self):
+        import json
+        try:
+            SETTINGS.write_text(json.dumps(self.settings, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
+    def remember(self, path):
+        recent = [str(path)] + [p for p in self.settings.get("recent", []) if p != str(path)]
+        self.settings["recent"] = recent[:8]
+        self.save_settings()
+
+    def start(self):
+        """Start the emulator for self.source and connect; raises on failure."""
+        a = self.args
+        firmware = self.icom_firmware
+        if not self.host:
+            raise RuntimeError("no emulator host: File > Host...")
+        local = self.host == "local"
+        if self.source:
+            self.remember(self.source.resolve())
+            if local:
+                firmware = local_path(self.source.resolve())
+            else:
+                self.status = f"uploading {self.source.name} ..."
+                firmware = upload(self.host, self.source)
+        options = ["--vnc", str(a.display)]
+        if self.source and self.source.suffix.lower() == ".bin" and self.settings.get("subcpu"):
+            options += ["--subcpu", self.icom_firmware]   # Icom's sub-CPU beside your firmware
+        self.status = f"starting {self.name} ..."
+        if local:                               # this computer: WSL on Windows
+            command = ["python3", "ic705.py", firmware] + options
+            if sys.platform == "win32":
+                command = ["wsl", "--cd", str(ROOT), "--exec"] + command
+            self.ssh = subprocess.Popen(command, cwd=ROOT)
+            lcd_port, control_port = 5900 + a.display, 4400 + a.display
+        else:                                   # ssh, both ports forwarded
+            remote = f"cd {a.dir} && exec " + " ".join(["python3", "ic705.py", firmware] + options)
+            self.ssh = subprocess.Popen([
+                "ssh", "-tt", "-o", "ExitOnForwardFailure=yes",
+                "-L", f"{a.port}:127.0.0.1:{5900 + a.display}",
+                "-L", f"{a.port + 100}:127.0.0.1:{4400 + a.display}", self.host, remote,
+            ])
+            lcd_port, control_port = a.port, a.port + 100
+        rfb = connect(lcd_port, self.ssh)
+        self.radio = Radio(Qmp(control_port))
+        threading.Thread(target=rfb.pump, daemon=True).start()
+        self.rfb = rfb
+        self.status = "knobs: drag or wheel · click = push · Ctrl+wheel: zoom · F5: reload"
+
+    def stop(self):
+        rfb, ssh = self.rfb, self.ssh
+        self.rfb = self.radio = self.ssh = None
+        if rfb is not None:
+            rfb.sock.close()
+        if ssh is not None and ssh.poll() is None:
+            ssh.terminate()
+            try:
+                ssh.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                ssh.kill()
+
+    def restart(self, source):
+        """Stop the current run and start @source (a local Path, or None for the
+        Icom firmware on the host) in the background."""
+        def work():
+            with self.lock:
+                self.stop()
+                self.source = source
+                for attempt in range(3):        # the old QEMU may still hold its ports
+                    try:
+                        self.start()
+                        return
+                    except (RuntimeError, ConnectionError, OSError) as error:
+                        self.stop()
+                        self.status = f"{self.name}: {error}"
+                        time.sleep(2)
+        self.ran = True
+        self.status = f"loading {source.name if source else self.icom_firmware} ..."
+        threading.Thread(target=work, daemon=True).start()
+
+
+ROOT = Path(__file__).resolve().parent
+
+
+def local_path(path):
+    """@path as ic705.py on this computer sees it: a WSL path on Windows."""
+    if sys.platform != "win32":
+        return str(path)
+    result = subprocess.run(["wsl", "wslpath", "-a", str(path).replace("\\", "/")],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"wslpath failed for {path}")
+    return result.stdout.strip()
 
 
 def upload(host, path):
@@ -712,8 +971,10 @@ def upload(host, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", required=True,
-                        help="ssh destination of the emulator host, e.g. user@raspberrypi.local")
+    parser.add_argument("--host",
+                        help="emulator host: 'local' (this computer, WSL on Windows) or an "
+                             "ssh destination such as user@raspberrypi.local (default: the last "
+                             "one used; without --host and --load nothing starts)")
     parser.add_argument("--dir", default="~/ic705-emu", help="emulator directory on the host")
     parser.add_argument("--firmware", default="firmware/705E140.dat",
                         help="firmware package, relative to --dir")
@@ -739,61 +1000,41 @@ def main():
                         help="with --snapshot: turn a knob (e.g. MULTI,5 or 'MAIN DIAL,100')")
     args = parser.parse_args()
 
-    qport = args.port + 100
-    firmware = args.firmware
-    if args.load:
-        try:
-            firmware = upload(args.host, args.load)
-        except (OSError, RuntimeError) as error:
-            print(f"error: {error}", file=sys.stderr)
-            return 1
-    remote = (f"cd {args.dir} && exec python3 ic705.py {firmware} "
-              f"--vnc {args.display}")
-    if args.subcpu and args.load and args.load.suffix.lower() == ".bin":
-        remote += f" --subcpu {args.firmware}"   # Icom's sub-CPU beside your main firmware
-    ssh = subprocess.Popen([
-        "ssh", "-tt", "-o", "ExitOnForwardFailure=yes",
-        "-L", f"{args.port}:127.0.0.1:{5900 + args.display}",
-        "-L", f"{qport}:127.0.0.1:{4400 + args.display}", args.host, remote,
-    ])
-    rfb = None
+    session = Session(args)
+    if not args.snapshot:
+        if args.host or args.load:              # run something at once
+            session.restart(session.source)
+        window(session, args.scale)
+        session.stop()
+        return 0
+    if not session.host:
+        parser.error("--snapshot needs --host")
     try:
-        rfb = connect(args.port, ssh)
-        radio = Radio(Qmp(qport))
-        threading.Thread(target=rfb.pump, daemon=True).start()
-        if args.snapshot:
-            time.sleep(args.wait)
-            if args.tap:
-                x, y = (int(v) for v in args.tap.split(","))
-                rfb.pointer(x, y, 1)
-                time.sleep(0.5)
-                rfb.pointer(x, y, 0)
-                time.sleep(3)
-            keys, knobs, _ = controls(radio)
-            if args.press:
-                radio.tap(next(k[2] for k in keys if k[0] == args.press))
-                time.sleep(3)
-            if args.turn:
-                name, steps = args.turn.rsplit(",", 1)
-                next(k[4] for k in knobs if k[0] == name)(int(steps))
-                time.sleep(4)
-            w, h, rgb = rfb.frame()
-            write_png(args.snapshot, w, h, rgb)
-            print(args.snapshot)
-        else:
-            window(rfb, radio, args.scale, f"IC-705 on {args.host}")
+        session.start()
+        radio = session.radio
+        time.sleep(args.wait)
+        if args.tap:
+            x, y = (int(v) for v in args.tap.split(","))
+            session.rfb.pointer(x, y, 1)
+            time.sleep(0.5)
+            session.rfb.pointer(x, y, 0)
+            time.sleep(3)
+        keys, knobs, _ = controls(radio)
+        if args.press:
+            radio.tap(next(k[2] for k in keys if k[0] == args.press))
+            time.sleep(3)
+        if args.turn:
+            name, steps = args.turn.rsplit(",", 1)
+            next(k[4] for k in knobs if k[0] == name)(int(steps))
+            time.sleep(4)
+        w, h, rgb = session.rfb.frame()
+        write_png(args.snapshot, w, h, rgb)
+        print(args.snapshot)
     except (RuntimeError, ConnectionError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     finally:
-        if rfb is not None:
-            rfb.sock.close()
-        if ssh.poll() is None:
-            ssh.terminate()
-            try:
-                ssh.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                ssh.kill()
+        session.stop()
     return 0
 
 

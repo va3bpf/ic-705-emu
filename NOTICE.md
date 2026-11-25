@@ -6,13 +6,14 @@ The table lists where each part came from.
 | Path | Origin | Licence |
 |---|---|---|
 | `qemu/machine/` | [jeskko/ic7300-homebrew](https://github.com/jeskko/ic7300-homebrew) `qemu-machine/src` @ `84fb65b`, with [nemanjan00/ic-705](https://github.com/nemanjan00/ic-705) `qemu/ic705-port.patch` @ `6629078` applied, then extended by this project. See the table below for the share of each file that is still IC-705 port code. | MIT (`qemu/LICENSE`) for the ic7300-homebrew code. The IC-705 port has no stated licence. |
-| `qemu/ic705/` | this project: device models (IC-705 board peripherals and rewritten RZ/A1H blocks), one file per device | GPL-2.0-or-later (built into QEMU) |
+| `qemu/ic705/` | this project: device models (IC-705 board peripherals and rewritten RZ/A1H blocks), one file per device | MIT (`LICENSE`); built into QEMU, whose binary is GPL-2.0-or-later |
 | `qemu/patches/hw-arm-build.patch` | this project; the Kconfig entry follows ic7300-homebrew | GPL-2.0-or-later (modifies QEMU) |
 | `qemu/patches/icount-io.patch`, `icount-rr.patch`, `tcg-caches.patch`, `arm-gic-scan.patch` | this project | GPL-2.0-or-later (modifies QEMU) |
 | `decoder/` | [sq6emm/ic705-ic9700-ic905-bring-your-own-firmware](https://github.com/sq6emm/ic705-ic9700-ic905-bring-your-own-firmware) @ `a91231f`, reduced to the files the launcher uses | MIT (`decoder/LICENSE`) |
-| `docs/ic705/IO_MAP.md`, `docs/ic705/BOARD.md` | this project, from the IC-705 service manual, the firmware and tests | — |
+| `docs/ic705/IO_MAP.md`, `docs/ic705/BOARD.md` | this project, from the IC-705 service manual, the firmware and tests | MIT (`LICENSE`) |
 | `docs/rz-a1h-machine.md` | ic7300-homebrew `qemu-machine/README.md` | MIT |
-| `ic705.py`, `ic705_remote.py`, `build-qemu.sh`, `README.md`, `examples/`, `docs/speed.md`, `docs/emulator.html`, `docs/images/` | this project | — |
+| `ic705.py`, `ic705_remote.py`, `build-qemu.sh`, `README.md`, `examples/`, `docs/speed.md`, `docs/emulator.html`, `docs/images/` | this project | MIT (`LICENSE`) |
+| LVGL, FreeRTOS kernel (fetched by `examples/lvgl/build.sh`, not in the repository) | [lvgl/lvgl](https://github.com/lvgl/lvgl) v9.2.2, [FreeRTOS/FreeRTOS-Kernel](https://github.com/FreeRTOS/FreeRTOS-Kernel) V11.1.0 | MIT |
 
 A QEMU binary built from this tree is covered by QEMU's licence
 (GPL-2.0-or-later).
